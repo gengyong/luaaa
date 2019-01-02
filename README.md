@@ -1,9 +1,11 @@
 
 ## Introduction
 
-luaaa is a simple tool to bind c++ class to lua. It was implement in only one header file, has very simple interface, easy to integrate and easy to use.
+luaaa is a simple tool to bind c++ class to lua. 
 
-with luaaa, you don't need write wrapper codes for your exists class/function, and also you don't need to run other program to generate wrapper codes. you just need to define the class to export in c++, and then use it in lua.
+It was implement intent to use only one header file, with very simple interface, easy to integrate to exists project.
+
+with luaaa, you don't need to write wrapper codes for your exists class/function, and you don't need to run any other tool to generate wrapper codes. just define the class to export and enjoy using it in lua.
 
 luaaa has no depencies to other libs but lua and c++11 standard lib, no cpp files. 
 
