@@ -33,4 +33,6 @@
 
 # Others
 lua
+lualib
 example/example
+example/vs2015
