@@ -284,12 +284,12 @@ namespace LUAAA_NS
 		{ \
 			static int Invoke(lua_State* state) \
 			{ \
-				void * callee = lua_touserdata(state, lua_upvalueindex(1)); \
-				luaL_argcheck(state, callee, 1, "cpp closure function not found."); \
-				if (callee) \
+				void * calleePtr = lua_touserdata(state, lua_upvalueindex(1)); \
+				luaL_argcheck(state, calleePtr, 1, "cpp closure function not found."); \
+				if (calleePtr) \
 				{ \
 					volatile int idx = sizeof...(ARGS); (void)(idx); \
-					LuaStackReturn<TRET>(state, (*(FTYPE*)(&callee))((LuaStack<ARGS>::get(state, idx--))...)); \
+					LuaStackReturn<TRET>(state, (*(FTYPE*)(calleePtr))((LuaStack<ARGS>::get(state, idx--))...)); \
 					return 1; \
 				} \
 				return 0; \
@@ -305,12 +305,12 @@ namespace LUAAA_NS
 		{ \
 			static int Invoke(lua_State* state) \
 			{ \
-				void * callee = lua_touserdata(state, lua_upvalueindex(1)); \
-				luaL_argcheck(state, callee, 1, "cpp closure function not found."); \
-				if (callee) \
+				void * calleePtr = lua_touserdata(state, lua_upvalueindex(1)); \
+				luaL_argcheck(state, calleePtr, 1, "cpp closure function not found."); \
+				if (calleePtr) \
 				{ \
 					volatile int idx = sizeof...(ARGS); (void)(idx); \
-					(*(FTYPE*)(&callee))((LuaStack<ARGS>::get(state, idx--))...); \
+					(*(FTYPE*)(calleePtr))((LuaStack<ARGS>::get(state, idx--))...); \
 				} \
 				return 0; \
 			} \
@@ -449,9 +449,6 @@ namespace LUAAA_NS
 			return new TCLASS((LuaStack<ARGS>::get(state, idx--))...);
 		}
 	};
-
-
-	
 }
 
 #include <array>
@@ -1133,7 +1130,18 @@ namespace LUAAA_NS
 		inline LuaModule& fun(const char * name, F f)
 		{
 			luaL_Reg regtab[] = { { name, FunctionCaller(f) },{ nullptr, nullptr } };
-			lua_pushlightuserdata(m_state, *(void**)(&f));
+
+			F * funPtr = (F*)lua_newuserdata(m_state, sizeof(F));
+			luaL_argcheck(m_state, funPtr != nullptr, 1, (std::string("faild to alloc mem to store function `") + name + "`").c_str());
+			*funPtr = f;
+
+			luaI_openlib(m_state, m_moduleName.c_str(), regtab, 1);
+			return (*this);
+		}
+
+		inline LuaModule& fun(const char * name, lua_CFunction f)
+		{
+			luaL_Reg regtab[] = { { name, f },{ nullptr, nullptr } };
 			luaI_openlib(m_state, m_moduleName.c_str(), regtab, 1);
 			return (*this);
 		}

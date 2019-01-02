@@ -110,11 +110,13 @@ $ sudo apt install lua5.1-0-dev
 
 2. make a link to lua header files
 ```bash
+$ cd luaaa
 $ ln -s /usr/include/lua5.1 lua
 ```
 
 3. build & run.
 ```bash
+$ cd example
 $ g++ -std=c++11  example.cpp -o example -lstdc++ -llua5.1
 $ ./example
 ```

@@ -6,8 +6,7 @@ function testAwesomeCat()
 	print(a)
 	a:eat({"fish", "milk", "cookie", "rice"});
 	print (a)
-
-	--a.speak()
+	a.speak("Thanks!")
 end
 
 function testAwesomeMod()
@@ -49,7 +48,7 @@ end
 
 function testAutoGC ()
 	local cat = AwesomeCat.new ("IWILLLEAVE");
-	--cat.speak("I will leave ...")
+	cat.speak("I will leave ...")
 	cat = nil;
 	collectgarbage ()
 end
@@ -65,7 +64,6 @@ testAwesomeMod();
 
 print ("\n\n-- 4 --. Test others\n")
 print ("pi = " .. pi .. "\n")
-
 
 print ("\n>>>>" .. collectgarbage ("count"))
 collectgarbage ()
