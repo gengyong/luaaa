@@ -6,7 +6,7 @@ function testAwesomeCat()
 	print(a)
 	a:eat({"fish", "milk", "cookie", "rice"});
 	print (a)
-	a.speak("Thanks!")
+	a:speak("Thanks!")
 end
 
 function testAwesomeMod()
@@ -48,7 +48,7 @@ end
 
 function testAutoGC ()
 	local cat = AwesomeCat.new ("IWILLLEAVE");
-	cat.speak("I will leave ...")
+	cat:speak("I will leave ...")
 	cat = nil;
 	collectgarbage ()
 end

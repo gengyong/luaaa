@@ -130,21 +130,21 @@ public:
 		for (auto it : foods)
 		{
 			LOG("%s eat %s.\n", m_name.c_str(), it.c_str());
-			m_weight += 0.1;
+			m_weight += 0.1f;
 		}
-		LOG("%s is getting fatter.", m_name.c_str());
+		LOG("%s is getting fatter.\n", m_name.c_str());
 	}
 
 	std::string toString() const
 	{ 
 		std::stringstream result;
-		result << "\"cat %s is "<< m_name << ", " << m_age <<" years old, has a weight of " << m_weight << " kg.\"";
+		result << m_name << " is a cat, he is " << m_age <<" years old, has a weight of " << m_weight << " kg.\"";
 		return result.str();
 	}
 
 	static void speak(const std::string& w)
 	{
-		LOG("%s, miaow~~", w.c_str());
+		LOG("%s, miaow~~\n", w.c_str());
 	}
 
 private:
@@ -225,6 +225,7 @@ void bindToLUA(lua_State * L)
 	luaCat.def("tag", "Animal");
 
 
+
 	// define a module with name "AwesomeMod"
 	LuaModule awesomeMod(L, "AwesomeMod");
 	awesomeMod.def("cint", 20190101);
@@ -244,7 +245,6 @@ void bindToLUA(lua_State * L)
 
 	// put something to global, just emit the module name
 	LuaModule(L).def("pi", 3.1415926535897932);
-
 
 	// operations can be chained.
 	LuaClass<int*>(L, "int")

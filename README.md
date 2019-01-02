@@ -16,6 +16,7 @@ To use it, just copy and include 'luaaa.hpp' in your source file.
 
 * simple.
 * powerful.
+* works lua 5.1, 5.2 and 5.3 version.
 
 ## Quick Start
 
@@ -98,7 +99,6 @@ ok, then you can access it from lua:
 ```
 
 
-
 ## Run Example
 
 ### Linux
@@ -108,21 +108,16 @@ ok, then you can access it from lua:
 $ sudo apt install lua5.1-0-dev
 ```
 
-2. make a link to lua header files
-```bash
-$ cd luaaa
-$ ln -s /usr/include/lua5.1 lua
-```
-
-3. build & run.
+2. build & run.
 ```bash
 $ cd example
-$ g++ -std=c++11  example.cpp -o example -lstdc++ -llua5.1
+$ g++ -std=c++11  example.cpp -I/usr/include/lua5.1 -o example -g -lstdc++ -llua5.1
 $ ./example
 ```
 
-### Windows
+### Visual C++
 
+Of course you know how to do it.
 
 ## Documents
 
