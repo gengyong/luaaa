@@ -204,6 +204,12 @@ void testMapMap(const std::map<std::string, std::map<std::string, std::string>>&
 }
 
 
+void testCallback(int (*f)(const std::string&, int, float), int val)
+{
+	auto result = f("a string from c++", val, 1.2345678f);
+	LOG("c++ testCallback: got result from lua callback: %d\n", result);
+}
+
 
 //===============================================
 // below shows ho to bind c++ with lua
@@ -241,6 +247,7 @@ void bindToLUA(lua_State * L)
 	awesomeMod.fun("testSet", testSet);
 	awesomeMod.fun("testSetSet", testSetSet);
 	awesomeMod.fun("testMapMap", testMapMap);
+	awesomeMod.fun("testCallback", testCallback);
 
 
 	// put something to global, just emit the module name

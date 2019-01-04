@@ -46,6 +46,20 @@ function testAwesomeMod()
 end
 
 
+function testCallback ()
+	local f = function(a, b, c)
+		print ("lua testCallback:")
+		print ("    param a:" .. tostring (a))
+		print ("    param b:" .. tostring (b))
+		print ("    param c:" .. tostring (c))
+		print ("    return b * b(" .. tostring(b * b) ..") as result to c++.\n")
+		return b * b;
+	end
+
+	AwesomeMod.testCallback(f, 5555)
+end
+
+
 function testAutoGC ()
 	local cat = AwesomeCat.new ("IWILLLEAVE");
 	cat:speak("I will leave ...")
@@ -60,10 +74,13 @@ print ("\n\n-- 2 --. Test AwesomeCat class\n")
 testAwesomeCat();
 
 print ("\n\n-- 3 --. Test AwesomeMod module\n")
-testAwesomeMod();
+testAwesomeMod ();
 
 print ("\n\n-- 4 --. Test others\n")
 print ("pi = " .. pi .. "\n")
+
+print ("\n\n-- 3 --. Test Callback\n")
+testCallback();
 
 print ("\n>>>>" .. collectgarbage ("count"))
 collectgarbage ()

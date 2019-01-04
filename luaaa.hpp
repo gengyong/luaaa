@@ -276,6 +276,90 @@ namespace LUAAA_NS
 		LuaStack<T>::put(L, t);
 	}
 
+#define IMPLEMENT_CALLBACK_INVOKER(CALLCONV) \
+	template<typename RET, typename ...ARGS> \
+	struct LuaStack<RET(CALLCONV*)(ARGS...)> \
+	{ \
+		typedef RET(CALLCONV*FTYPE)(ARGS...); \
+		inline static FTYPE get(lua_State * L, int idx) \
+		{ \
+			static lua_State * cacheLuaState = nullptr; \
+			static int cacheLuaFuncId = 0; \
+			struct HelperClass \
+			{ \
+				static RET CALLCONV f_callback(ARGS... args) \
+				{ \
+					lua_rawgeti(cacheLuaState, LUA_REGISTRYINDEX, cacheLuaFuncId); \
+					if (lua_isfunction(cacheLuaState, -1)) \
+					{ \
+						int initParams[] = { (LuaStack<ARGS>::put(cacheLuaState, args), 0)..., 0 }; \
+						if (lua_pcall(cacheLuaState, sizeof...(ARGS), 1, 0) != 0) \
+						{ \
+							lua_error(cacheLuaState); \
+						} \
+						luaL_unref(cacheLuaState, LUA_REGISTRYINDEX, cacheLuaFuncId); \
+					} \
+					else \
+					{ \
+						lua_pushnil(cacheLuaState); \
+					} \
+					return LuaStack<RET>::get(cacheLuaState, lua_gettop(cacheLuaState)); \
+				} \
+			}; \
+			if (lua_isfunction(L, idx)) \
+			{ \
+				cacheLuaState = L; \
+				lua_pushvalue(L, idx); \
+				cacheLuaFuncId = luaL_ref(L, LUA_REGISTRYINDEX); \
+				return HelperClass::f_callback; \
+			} \
+			return nullptr; \
+		} \
+		inline void put(lua_State * L, FTYPE f) \
+		{ \
+			lua_pushcfunction(L, NonMemberFunctionCaller(f)); \
+		} \
+	}; \
+	template<typename ...ARGS> \
+	struct LuaStack<void(CALLCONV*)(ARGS...)> \
+	{ \
+		typedef void(CALLCONV*FTYPE)(ARGS...); \
+		inline static FTYPE get(lua_State * L, int idx) \
+		{ \
+			static lua_State * cacheLuaState = nullptr; \
+			static int cacheLuaFuncId = 0; \
+			struct HelperClass \
+			{ \
+				static void CALLCONV f_callback(ARGS... args) \
+				{ \
+					lua_rawgeti(cacheLuaState, LUA_REGISTRYINDEX, cacheLuaFuncId); \
+					if (lua_isfunction(cacheLuaState, -1)) \
+					{ \
+						int initParams[] = { (LuaStack<ARGS>::put(cacheLuaState, args), 0)..., 0 }; \
+						if (lua_pcall(cacheLuaState, sizeof...(ARGS), 1, 0) != 0) \
+						{ \
+							lua_error(cacheLuaState); \
+						} \
+						luaL_unref(cacheLuaState, LUA_REGISTRYINDEX, cacheLuaFuncId); \
+					} \
+					return; \
+				} \
+			}; \
+			if (lua_isfunction(L, idx)) \
+			{ \
+				cacheLuaState = L; \
+				lua_pushvalue(L, idx); \
+				cacheLuaFuncId = luaL_ref(L, LUA_REGISTRYINDEX); \
+				return HelperClass::f_callback; \
+			} \
+			return nullptr; \
+		} \
+		inline void put(lua_State * L, FTYPE f) \
+		{ \
+			lua_pushcfunction(L, NonMemberFunctionCaller(f)); \
+		} \
+	};
+
 
 	//========================================================
 	// non-member function caller & static member function caller
@@ -327,36 +411,43 @@ namespace LUAAA_NS
 #if defined(_MSC_VER)	
 	IMPLEMENT_FUNCTION_CALLER(NonMemberFunctionCaller, __cdecl, 0);
 	IMPLEMENT_FUNCTION_CALLER(MemberFunctionCaller, __cdecl, 1);
+	IMPLEMENT_CALLBACK_INVOKER(__cdecl);
 
 #	ifdef _M_CEE
 	IMPLEMENT_FUNCTION_CALLER(NonMemberFunctionCaller, __clrcall, 0);
 	IMPLEMENT_FUNCTION_CALLER(MemberFunctionCaller, __clrcall, 1);
+	IMPLEMENT_CALLBACK_INVOKER(__clrcall);
 #	endif
 
 #	if defined(_M_IX86) && !defined(_M_CEE)
 	IMPLEMENT_FUNCTION_CALLER(NonMemberFunctionCaller, __fastcall, 0);
 	IMPLEMENT_FUNCTION_CALLER(MemberFunctionCaller, __fastcall, 1);
+	IMPLEMENT_CALLBACK_INVOKER(__fastcall);
 #	endif
 
 #	ifdef _M_IX86
 	IMPLEMENT_FUNCTION_CALLER(NonMemberFunctionCaller, __stdcall, 0);
 	IMPLEMENT_FUNCTION_CALLER(MemberFunctionCaller, __stdcall, 1);
+	IMPLEMENT_CALLBACK_INVOKER(__stdcall);
 #	endif
 
 #	if ((defined(_M_IX86) && _M_IX86_FP >= 2) || defined(_M_X64)) && !defined(_M_CEE)
 	IMPLEMENT_FUNCTION_CALLER(NonMemberFunctionCaller, __vectorcall, 0);
 	IMPLEMENT_FUNCTION_CALLER(MemberFunctionCaller, __vectorcall, 1);
+	IMPLEMENT_CALLBACK_INVOKER(__vectorcall);
 #	endif
 
 #elif defined(__GNUC__)
 #	define _NOTHING
 	IMPLEMENT_FUNCTION_CALLER(NonMemberFunctionCaller, _NOTHING, 0);
 	IMPLEMENT_FUNCTION_CALLER(MemberFunctionCaller, _NOTHING, 1);
+	IMPLEMENT_CALLBACK_INVOKER(_NOTHING);
 #	undef _NOTHING	
 #else
 #	define _NOTHING	
 	IMPLEMENT_FUNCTION_CALLER(NonMemberFunctionCaller, _NOTHING, 0);
 	IMPLEMENT_FUNCTION_CALLER(MemberFunctionCaller, _NOTHING, 1);
+	IMPLEMENT_CALLBACK_INVOKER(_NOTHING);
 #	undef _NOTHING		
 #endif	
 
@@ -476,57 +567,6 @@ namespace LUAAA_NS
 
 namespace LUAAA_NS
 {
-	// native array
-	/*
-	template <typename T>
-	std::vector<T> & NativeArrayDataHolder(int size)
-	{
-		thread_local static std::vector<T> sss;
-		sss.reserve(size);
-		return sss;
-
-	}
-
-	template<typename K, size_t N>
-	struct LuaStack<K[N]>
-	{
-		inline static K * get(lua_State * L, int idx)
-		{
-			DUMP(L, "LuaStack<K[N]> aaa");
-			printf("idx: %d", idx);
-
-			auto & holder = NativeArrayDataHolder<K>(N);
-			luaL_argcheck(L, lua_istable(L, idx), 1, "required table not found on stack.");
-			if (lua_istable(L, idx))
-			{
-				int index = 0;
-				lua_pushnil(L);
-				while (0 != lua_next(L, idx) && index < N)
-				{
-					DUMP(L, "LuaStack<K[N]> bbb");
-					holder[index++] = LuaStack<K>::get(L, idx + 2);
-					DUMP(L, "LuaStack<K[N]> ccc");
-					lua_pop(L, 1);
-					DUMP(L, "LuaStack<K[N]> ddd");
-				}
-				lua_pop(L, 0);
-				DUMP(L, "LuaStack<K[N]> eee");
-			}
-			return holder.data();
-		}
-
-		inline static void put(lua_State * L, const K* p)
-		{
-			lua_newtable(L);
-			for (size_t index = 0; index < N; index++)
-			{
-				LuaStack<K>::put(L, p[index]);
-				lua_rawseti(L, -2, index + 1);
-			}
-		}
-	};
-	*/
-
 	// array
 	template<typename K, size_t N>
 	struct LuaStack<std::array<K, N>>
