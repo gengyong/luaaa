@@ -10,6 +10,32 @@
 
 #define LOG printf
 
+inline void DUMP(lua_State * state, const std::string name = "") {
+    printf(">>>>>>>>>>>>>>>>>>>>>>>>>[%s]\n", name.c_str());
+    int top = lua_gettop(state);
+    for (int i = 1; i <= top; i++) {
+        printf("%d\t%s\t", i, luaL_typename(state, i));
+        switch (lua_type(state, i)) {
+        case LUA_TNUMBER:
+            printf("%g\n", lua_tonumber(state, i));
+            break;
+        case LUA_TSTRING:
+            printf("%s\n", lua_tostring(state, i));
+            break;
+        case LUA_TBOOLEAN:
+            printf("%s\n", (lua_toboolean(state, i) ? "true" : "false"));
+            break;
+        case LUA_TNIL:
+            printf("%s\n", "nil");
+            break;
+        default:
+            printf("%p\n", lua_topointer(state, i));
+            break;
+        }
+    }
+    printf("<<<<<<<<<<<<<<<<<<<<<<<<<\n");
+}
+
 void bindToLUA(lua_State *);
 
 void runLuaExample(lua_State * ls)
@@ -138,7 +164,7 @@ public:
 	std::string toString() const
 	{ 
 		std::stringstream result;
-		result << m_name << " is a cat, he is " << m_age <<" years old, has a weight of " << m_weight << " kg.\"";
+		result << m_name << " is a cat, he is " << m_age <<" years old, has a weight of " << m_weight << " kg.";
 		return result.str();
 	}
 
@@ -153,12 +179,45 @@ private:
 	float m_weight;
 };
 
+class SingletonWorld 
+{
+public:
+    static SingletonWorld * getInstance() {
+        static SingletonWorld instance("singleton");
+        return &instance;
+    }
 
+    static SingletonWorld * newInstance(const std::string tagName) {
+        return new SingletonWorld(tagName);
+    }
+
+    static void delInstance(SingletonWorld * instance) {
+        delete instance;
+    }
+public:
+    const std::string getTag() const {
+        return mTag;
+    }
+
+    SingletonWorld() {
+        mTag = "default";
+        LOG("SingletonWorld[%s] constructed.\n", mTag.c_str());
+    }
+
+    SingletonWorld(const std::string tagName) : mTag(tagName) {
+        LOG("SingletonWorld[%s] constructed.\n", mTag.c_str());
+    }
+
+    ~SingletonWorld() {
+        LOG("SingletonWorld[%s] destructed.\n", mTag.c_str());
+    }
+private:
+    std::string mTag;
+};
 
 //===============================================================================
 // example c functions
 //===============================================================================
-
 void testSet(const std::set<int>& s)
 {
 	LOG("testSet: set<int> size: %lu\n", s.size());
@@ -230,6 +289,18 @@ void bindToLUA(lua_State * L)
 	luaCat.fun("__tostring", &Cat::toString);
 	luaCat.def("tag", "Animal");
 
+    // bind singleton class to lua
+    LuaClass<SingletonWorld> luaWorld(L, "SingletonWorld");
+    /// use class constructor as instance spawner, default destructor will be called from gc.
+    luaWorld.ctor();
+    /// use static function as instance spawner, default destructor will be called from gc.
+    luaWorld.ctor("newInstance", &SingletonWorld::newInstance);
+    /// use static function as instance spawner and static function as delete function which be called from gc.
+    luaWorld.ctor("managedInstance", &SingletonWorld::newInstance , &SingletonWorld::delInstance);
+    /// for singleton pattern, set deleter(gc) to nullptr to avoid singleton instance be destroyed.
+    luaWorld.ctor("getInstance", &SingletonWorld::getInstance, nullptr);
+    luaWorld.fun("getTag", &SingletonWorld::getTag);
+    
 
 
 	// define a module with name "AwesomeMod"

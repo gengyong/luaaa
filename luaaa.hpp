@@ -44,6 +44,10 @@ inline void luaL_setfuncs(lua_State *L, const luaL_Reg *l, int nup) {
 
 namespace LUAAA_NS
 {
+    //========================================================
+    // Lua Class
+    //========================================================
+
 	template <typename>	struct LuaClass;
 
 	//========================================================
@@ -102,13 +106,13 @@ namespace LUAAA_NS
 		{
 			if (!LuaClass<T*>::klassName.empty())
 			{
-				T ** t = (T**)luaL_checkudata(state, -1, LuaClass<T*>::klassName.c_str());
+				T ** t = (T**)luaL_checkudata(state, idx, LuaClass<T*>::klassName.c_str());
 				luaL_argcheck(state, t != NULL, 1, "invalid user data");
 				return *t;
 			}
 			else if (!LuaClass<T>::klassName.empty())
 			{
-				T ** t = (T**)luaL_checkudata(state, -1, LuaClass<T>::klassName.c_str());
+				T ** t = (T**)luaL_checkudata(state, idx, LuaClass<T>::klassName.c_str());
 				luaL_argcheck(state, t != NULL, 1, "invalid user data");
 				luaL_argcheck(state, *t != NULL, 1, "invalid user data");
 				return *t;
@@ -213,7 +217,7 @@ namespace LUAAA_NS
 	{
 		inline static const char * get(lua_State * L, int idx)
 		{
-			thread_local static char sss[256];
+			thread_local static char sss[64];
 
 			switch (lua_type(L, idx))
 			{
@@ -1001,12 +1005,57 @@ namespace LUAAA_NS
 	};
 
 
+	// std::pair
+	template<typename U, typename V>
+	struct LuaStack<std::pair<U, V>>
+	{
+		typedef std::pair<U, V> Container;
+		inline static Container get(lua_State * L, int idx)
+		{
+			Container result;
+			luaL_argcheck(L, lua_istable(L, idx), 1, "required table not found on stack.");
+			if (lua_istable(L, idx))
+			{
+				result.first = LuaStack<typename Container::first_type>::get(L, idx + 1);
+				result.second = LuaStack<typename Container::second_type>::get(L, idx + 2);
+			}
+			return result;
+		}
+
+		inline static void put(lua_State * L, const Container& s)
+		{
+			lua_newtable(L);
+			LuaStack<typename Container::first_type>::put(L, s.first);
+			lua_rawseti(L, -2, 1);
+			LuaStack<typename Container::second_type>::put(L, s.second);
+			lua_rawseti(L, -2, 2);			
+		}
+	};
+
 	//========================================================
-	// export class
+	// utilities
 	//========================================================
+    template<typename TCLASS, bool = std::is_destructible<TCLASS>::value>
+    struct DestructorHelperClass {
+        static void f_delete(TCLASS * obj) {
+            delete obj;
+        }
+    };
+
+    template<typename TCLASS>
+    struct DestructorHelperClass<TCLASS, false> {
+        static void f_delete(TCLASS * obj) {
+            return;
+        }
+    };
+
+    //========================================================
+    // export class
+    //========================================================
 	template <typename TCLASS>
 	struct LuaClass
 	{
+        template<typename TCLASS, bool> friend struct DestructorHelperClass;
 	public:
 		LuaClass(lua_State * state, const std::string& name, const luaL_Reg * functions = nullptr)
 			: m_state(state)
@@ -1017,33 +1066,16 @@ namespace LUAAA_NS
 
 			if (state)
 			{
-				struct HelperClass {
-					static int f__gc(lua_State* state) {
-						TCLASS ** objPtr = (TCLASS**)luaL_checkudata(state, -1, LuaClass<TCLASS>::klassName.c_str());
-						if (objPtr)
-						{
-							delete *objPtr;
-						}
-						return 0;
-					}
-				};
-
-				luaL_Reg destructor[] = {
-					{ "__gc", HelperClass::f__gc },
-					{ nullptr, nullptr }
-				};
-
 				luaL_newmetatable(state, klassName.c_str());
 				lua_pushvalue(state, -1);
 				lua_setfield(state, -2, "__index");
-				luaL_setfuncs(state, destructor, 0);
 				if (functions)
 				{
 					luaL_setfuncs(state, functions, 0);
 				}
 				lua_pop(state, 1);
 
-				ctor<>();
+				//ctor<>();
 			}
 		}
 
@@ -1052,47 +1084,330 @@ namespace LUAAA_NS
 		inline LuaClass<TCLASS>& ctor(const char * name = "new")
 		{
 			struct HelperClass {
+                static int f__gc(lua_State* state) {
+                    TCLASS ** objPtr = (TCLASS**)luaL_checkudata(state, -1, LuaClass<TCLASS>::klassName.c_str());
+                    if (objPtr)
+                    {
+                        //std::cout << "ctor(const char * name = 'new'):f__gc" << std::endl;
+                        delete *objPtr;
+                    }
+                    return 0;
+                }
+
 				static int f_new(lua_State* state) {
 					auto obj = ConstructorCaller<TCLASS, ARGS...>::Invoke(state);
 					if (obj)
-					{
+					{   
 						TCLASS ** objPtr = (TCLASS**)lua_newuserdata(state, sizeof(TCLASS*));
 						if (objPtr)
 						{
 							*objPtr = obj;
+
+                            luaL_Reg destructor[] = {
+                                { "__gc", HelperClass::f__gc },
+                                { nullptr, nullptr }
+                            };
+
 							luaL_getmetatable(state, LuaClass<TCLASS>::klassName.c_str());
-							lua_setmetatable(state, -2);
+                            luaL_setfuncs(state, destructor, 0);
+                            lua_setmetatable(state, -2);
+
 							return 1;
 						}
 						else
 						{
-							delete obj;
+                            DestructorHelperClass<TCLASS>::f_delete(obj);
 						}
 					}
 					lua_pushnil(state);			
 					return 1;
 				}
-
 			};
 
 			luaL_Reg constructor[] = { { name, HelperClass::f_new },{ nullptr, nullptr } };
-
 #if USE_NEW_MODULE_REGISTRY
-			lua_newtable(m_state);
-			luaL_setfuncs(m_state, constructor, 0);
-			lua_setglobal(m_state, klassName.c_str());
+            //lua_newtable(state);
+            //luaL_setfuncs(state, regtable, nup);
+            //lua_setglobal(state, klassName);
+
+            lua_getglobal(m_state, klassName.c_str());
+            if (lua_isnil(m_state, -1))
+            {
+                lua_pop(m_state, 1);
+                lua_newtable(m_state);
+            }
+            luaL_setfuncs(m_state, constructor, 0);
+            lua_setglobal(m_state, klassName.c_str());
 #else
-			luaL_register(m_state, klassName.c_str(), constructor);	//luaL_openlib(state, klassName.c_str(), constructor, 0);
-			lua_pop(m_state, 1);
+            luaL_openlib(m_state, klassName.c_str(), constructor, 0);
 #endif
+
 			return (*this);
 		}
 
-		template<typename ...ARGS>
-		inline LuaClass<TCLASS>& ctor(const std::string& name)
-		{
-			return ctor<ARGS...>(name.c_str());
-		}
+        template<typename ...ARGS>
+        inline LuaClass<TCLASS>& ctor(const char * name, TCLASS*(*spawner)(ARGS...)) {
+            typedef decltype(spawner) SPAWNERFTYPE;
+            struct HelperClass {
+                static int f__gc(lua_State* state) {
+                    TCLASS ** objPtr = (TCLASS**)luaL_checkudata(state, -1, LuaClass<TCLASS>::klassName.c_str());
+                    if (objPtr)
+                    {
+                        //std::cout << "ctor(const char * name, F f):f__gc" << std::endl;
+                        delete *objPtr;
+                    }
+                    return 0;
+                }
+
+                static int f_new(lua_State* state) {
+                    void * spawner = lua_touserdata(state, lua_upvalueindex(1));
+                    luaL_argcheck(state, spawner, 1, "cpp closure spawner not found.");
+                    if (spawner) {
+                        volatile int idx = sizeof...(ARGS); (void)(idx);
+                        auto obj = (*(SPAWNERFTYPE*)(spawner))(LuaStack<ARGS>::get(state, idx--)...);
+                        if (obj)
+                        {
+                            TCLASS ** objPtr = (TCLASS**)lua_newuserdata(state, sizeof(TCLASS*));
+                            if (objPtr)
+                            {
+                                *objPtr = obj;
+
+                                luaL_Reg destructor[] = {
+                                    { "__gc", HelperClass::f__gc },
+                                    { nullptr, nullptr }
+                                };
+
+                                luaL_getmetatable(state, LuaClass<TCLASS>::klassName.c_str());
+                                luaL_setfuncs(state, destructor, 0);
+                                lua_setmetatable(state, -2);
+                                
+                                return 1;
+                            }
+                            else
+                            {
+                                DestructorHelperClass<TCLASS>::f_delete(obj);
+                            }
+                        }
+                    }
+                    lua_pushnil(state);
+                    return 1;
+                }
+
+            };
+
+            luaL_Reg constructor[] = { { name, HelperClass::f_new },{ nullptr, nullptr } };
+#if USE_NEW_MODULE_REGISTRY
+            lua_getglobal(m_state, klassName.c_str());
+            if (lua_isnil(m_state, -1))
+            {
+                lua_pop(m_state, 1);
+                lua_newtable(m_state);
+            }
+#endif
+
+            SPAWNERFTYPE * spawnerPtr = (SPAWNERFTYPE*)lua_newuserdata(m_state, sizeof(SPAWNERFTYPE));
+            luaL_argcheck(m_state, spawnerPtr != nullptr, 1, (std::string("faild to alloc mem to store spawner for ctor `") + name + "`").c_str());
+            *spawnerPtr = spawner;
+
+#if USE_NEW_MODULE_REGISTRY
+            luaL_setfuncs(m_state, constructor, 1);
+            lua_setglobal(m_state, klassName.c_str());
+#else
+            luaL_openlib(m_state, klassName.c_str(), constructor, 1);
+#endif
+
+            return (*this);
+        }
+
+        template<typename TRET, typename ...ARGS>
+        inline LuaClass<TCLASS>& ctor(const char * name, TCLASS*(*spawner)(ARGS...), TRET(*deleter)(TCLASS*)){
+            typedef decltype(spawner) SPAWNERFTYPE;
+            typedef decltype(deleter) DELETERFTYPE;
+
+            struct HelperClass {
+                static int f__gc(lua_State* state) {
+                    void * deleter = lua_touserdata(state, lua_upvalueindex(1));
+                    luaL_argcheck(state, deleter, 1, "cpp closure deleter not found.");
+                    if (deleter) {
+                        TCLASS ** objPtr = (TCLASS**)luaL_checkudata(state, -1, LuaClass<TCLASS>::klassName.c_str());
+                        if (objPtr)
+                        {
+                            //std::cout << "ctor(const char * name, F f, D d):f__gc" << std::endl;
+                            (*(DELETERFTYPE*)(deleter))(*objPtr);
+                        }
+                    }
+                    
+                    return 0;
+                }
+
+                static int f_new(lua_State* state) {
+                    void * spawner = lua_touserdata(state, lua_upvalueindex(1));
+                    luaL_argcheck(state, spawner, 1, "cpp closure spawner not found.");
+
+                    void * deleter = lua_touserdata(state, lua_upvalueindex(2));
+                    luaL_argcheck(state, deleter, 1, "cpp closure deleter not found.");
+
+                    if (spawner) {
+                        volatile int idx = sizeof...(ARGS); (void)(idx);
+                        auto obj = (*(SPAWNERFTYPE*)(spawner))(LuaStack<ARGS>::get(state, idx--)...);
+                        if (obj)
+                        {
+                            TCLASS ** objPtr = (TCLASS**)lua_newuserdata(state, sizeof(TCLASS*));
+                            if (objPtr)
+                            {
+                                *objPtr = obj;
+
+                                luaL_Reg destructor[] = {
+                                    { "__gc", HelperClass::f__gc },
+                                    { nullptr, nullptr }
+                                };
+
+                               
+                                luaL_getmetatable(state, LuaClass<TCLASS>::klassName.c_str());
+
+                                DELETERFTYPE * deleterPtr = (DELETERFTYPE*)lua_newuserdata(state, sizeof(DELETERFTYPE));
+                                luaL_argcheck(state, deleterPtr != nullptr, 1, (std::string("faild to alloc mem to store deleter for ctor meta table `") + LuaClass<TCLASS>::klassName + "`").c_str());
+                                *deleterPtr = *(DELETERFTYPE*)(deleter);
+
+                                luaL_setfuncs(state, destructor, 1);
+
+                                lua_setmetatable(state, -2);
+
+                                return 1;
+                            }
+                            else
+                            {
+                                DestructorHelperClass<TCLASS>::f_delete(obj);
+                            }
+                        }
+                    }
+                    lua_pushnil(state);
+                    return 1;
+                }
+
+            };
+
+            luaL_Reg constructor[] = { { name, HelperClass::f_new },{ nullptr, nullptr } };
+
+#if USE_NEW_MODULE_REGISTRY
+            lua_getglobal(m_state, klassName.c_str());
+            if (lua_isnil(m_state, -1))
+            {
+                lua_pop(m_state, 1);
+                lua_newtable(m_state);
+            }
+#endif
+
+            SPAWNERFTYPE * spawnerPtr = (SPAWNERFTYPE*)lua_newuserdata(m_state, sizeof(SPAWNERFTYPE));
+            luaL_argcheck(m_state, spawnerPtr != nullptr, 1, (std::string("faild to alloc mem to store spawner for ctor `") + name + "`").c_str());
+            *spawnerPtr = spawner;
+
+            DELETERFTYPE * deleterPtr = (DELETERFTYPE*)lua_newuserdata(m_state, sizeof(DELETERFTYPE));
+            luaL_argcheck(m_state, deleterPtr != nullptr, 1, (std::string("faild to alloc mem to store deleter for ctor `") + name + "`").c_str());
+            *deleterPtr = deleter;
+
+#if USE_NEW_MODULE_REGISTRY
+            luaL_setfuncs(m_state, constructor, 2);
+            lua_setglobal(m_state, klassName.c_str());
+#else
+            luaL_openlib(m_state, klassName.c_str(), constructor, 2);
+#endif
+
+            return (*this);
+        }
+
+        template<typename ...ARGS>
+        inline LuaClass<TCLASS>& ctor(const char * name, TCLASS*(*spawner)(ARGS...), nullptr_t) {
+            typedef decltype(spawner) SPAWNERFTYPE;
+
+            struct HelperClass {
+                static int f__nogc(lua_State* state) {
+                    //std::cout << "ctor(const char * name, TCLASS*(*spawner)(ARGS...), nullptr_t):f__nogc" << std::endl;
+                    return 0;
+                }
+
+                static int f_new(lua_State* state) {
+                    void * spawner = lua_touserdata(state, lua_upvalueindex(1));
+                    luaL_argcheck(state, spawner, 1, "cpp closure spawner not found.");
+                    if (spawner) {
+                        volatile int idx = sizeof...(ARGS)+1; (void)(idx);
+                        auto obj = (*(SPAWNERFTYPE*)(spawner))(LuaStack<ARGS>::get(state, idx--)...);
+                        if (obj)
+                        {
+                            TCLASS ** objPtr = (TCLASS**)lua_newuserdata(state, sizeof(TCLASS*));
+                            if (objPtr)
+                            {
+                                *objPtr = obj;
+
+                                luaL_Reg destructor[] = {
+                                    { "__gc", HelperClass::f__nogc },
+                                    { nullptr, nullptr }
+                                };
+
+                                luaL_getmetatable(state, LuaClass<TCLASS>::klassName.c_str());
+                                luaL_setfuncs(state, destructor, 0);
+                                lua_setmetatable(state, -2);
+                                return 1;
+                            }
+                            else
+                            {
+                                DestructorHelperClass<TCLASS>::f_delete(obj);
+                            }
+                        }
+                        
+                    }
+                    lua_pushnil(state);
+                    return 1;
+                }
+
+            };
+
+            luaL_Reg constructor[] = { { name, HelperClass::f_new },{ nullptr, nullptr } };
+
+#if USE_NEW_MODULE_REGISTRY
+            lua_getglobal(m_state, klassName.c_str());
+            if (lua_isnil(m_state, -1))
+            {
+                lua_pop(m_state, 1);
+                lua_newtable(m_state);
+            }
+#endif
+            SPAWNERFTYPE * spawnerPtr = (SPAWNERFTYPE*)lua_newuserdata(m_state, sizeof(SPAWNERFTYPE));
+            luaL_argcheck(m_state, spawnerPtr != nullptr, 1, (std::string("faild to alloc mem to store spawner for ctor `") + name + "`").c_str());
+            *spawnerPtr = spawner;
+
+#if USE_NEW_MODULE_REGISTRY
+            luaL_setfuncs(m_state, constructor, 1);
+            lua_setglobal(m_state, klassName.c_str());
+#else
+            luaL_openlib(m_state, klassName.c_str(), constructor, 1);
+#endif
+
+            return (*this);
+        }
+
+       
+
+        template<typename ...ARGS>
+        inline LuaClass<TCLASS>& ctor(const std::string& name)
+        {
+            return ctor<ARGS...>(name.c_str());
+        }
+
+        template<typename ...ARGS>
+        inline LuaClass<TCLASS>& ctor(const std::string& name, TCLASS*(*spawner)(ARGS...)) {
+            return ctor<F>(name.c_str(), spawner);
+        }
+
+        template<typename TRET, typename ...ARGS>
+        inline LuaClass<TCLASS>& ctor(const std::string& name, TCLASS*(*spawner)(ARGS...), TRET(*deleter)(TCLASS*)) {
+            return ctor<F, D>(name.c_str(), spawner, deleter);
+        }
+
+        template<typename ...ARGS>
+        inline LuaClass<TCLASS>& ctor(const std::string& name, TCLASS*(*spawner)(ARGS...), nullptr_t) {
+            return ctor<F, D>(name.c_str(), spawner, nullptr);
+        }
 
 		template<typename F>
 		inline LuaClass<TCLASS>& fun(const char * name, F f)

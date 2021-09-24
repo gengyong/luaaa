@@ -5,18 +5,19 @@ Luaaa is a simple tool to bind c++ class to lua.
 
 It was implement intent to use only one header file, with very simple interface, easy to integrate to exists project.
 
-With luaaa, you don't need to write wrapper codes for your exists class/function, and you don't need to run any other tool to generate wrapper codes. Just define the class to export and enjoy using it in lua.
+With luaaa, you don't need to write wrapper codes for exists class/function, and you don't need to run any other tool to generate wrapper codes. Just define the class to export and enjoy using it in lua.
 
 Luaaa has no dependencies to other libs but lua and c++11 standard lib, no cpp files. 
 
-To use it, just copy and include 'luaaa.hpp' in your source file.
+To use it, just copy and include 'luaaa.hpp' in source file.
 
 
 ## Features
 
 * simple.
 * powerful.
-* works lua 5.1, 5.2 and 5.3 version.
+* no genrated wrapper codes.
+* works with lua 5.1, 5.2, 5.3 and 5.4.
 
 ## Quick Start
 
@@ -38,6 +39,7 @@ public:
 	void setName(const std::string&);
 	const std::string& getName() const;
 	void eat(const std::list<std::string>& foods);
+	static void speak(const std::string& w);
 	//...
 private:
 	//...
@@ -52,21 +54,74 @@ luaCat.ctor<std::string>();
 luaCat.fun("setName", &Cat::setName);
 luaCat.fun("getName", &Cat::getName);
 luaCat.fun("eat", &Cat::eat);
+// static mmember fuction was exported as Lua class member fuction.
+// from Lua, call it as same as other member fuctions.
+luaCat.fun("speak", &Cat::speak);
 luaCat.def("tag", "Cat");
 
 // Done.
 
 ```
 
-ok, then you can aeess lua class "AwesomeCat" from lua.
+ok, then you can access lua class "AwesomeCat" from lua.
 ```lua
 
 local cat = AwesomeCat.new("Bingo");
-cat.eat({"fish", "milk", "cookie", "odd thing" });
+cat:eat({"fish", "milk", "cookie", "odd thing" });
+cat:speak("Thanks!");
 
 ```
 
-you can export something as a module to lua, you can access the module without create instance for it.
+to export constructors, for example, instance getter of singleton pattern:
+```
+LuaClass<SingletonWorld> luaWorld(L, "SingletonWorld");
+/// use class constructor as instance spawner, default destructor will be called from gc.
+luaWorld.ctor<std::string>();
+
+/// use static function as instance spawner, default destructor will be called from gc.
+luaWorld.ctor("newInstance", &SingletonWorld::newInstance);
+
+/// use static function as instance spawner and static function as delete function which be called from gc.
+luaWorld.ctor("managedInstance", &SingletonWorld::newInstance , &SingletonWorld::delInstance);
+
+/// for singleton pattern, set deleter(gc) to nullptr to avoid singleton instance be destroyed.
+luaWorld.ctor("getInstance", &SingletonWorld::getInstance, nullptr);
+```
+instance spawner and delete function can be static member function or global function,
+and delete function must accept one instance pointer which to be collect back or delete. 
+
+----
+***Breaking Changes***
+**Always** define **at least one** 'ctor' for a LuaClass.
+
+in previous version, a default 'ctor' was defined in LuaClass constructor, default 'ctor' call default C++ class constructor, and register C++ class destructor as gc function. 
+In some case, this default 'ctor' is not fit requirements or is invalid, for example, singleton class declare constructor/destructor as protected/private methods, in this case, default 'ctor' don't works, a custom 'ctor' is required here. 
+in current version, the default 'ctor' was removed from LuaClass constructor, so user must provide a 'ctor' in binding codes otherwise the LuaClass cannot be instantiate in lua.
+In most case, just define a default 'ctor' as below:
+    ```cpp
+    LuaClass<XXX> luaCls(luaState, 'XXXname');
+    luaCls.ctor(); 
+    ```
+above codes will define a spawner named as 'new', in lua `XXXname.new()` equivalent to C++:
+	```cpp
+	new XXX();
+	```
+or change spawner name to 'create':
+	```cpp
+	luaCls.ctor("create");
+	```
+add sigature to match C++ class constructor:
+	```cpp
+	luaCls.ctor<std::string>('create');
+	```
+which defined a spawner named as 'create', in lua `XXXname.create("string param")` equivalent to C++:
+	```cpp
+	new XXX("string param");
+	```
+----
+
+static member function, global fuctions or constant can be export in module.
+module has no spawner or destructor.
 ```cpp
 
 #include "luaaa.hpp"

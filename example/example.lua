@@ -5,7 +5,7 @@ function testAwesomeCat()
 	a:setAge(2);
 	print(a)
 	a:eat({"fish", "milk", "cookie", "rice"});
-	print (a)
+	print(a)
 	a:speak("Thanks!")
 end
 
@@ -67,6 +67,31 @@ function testAutoGC ()
 	collectgarbage ()
 end
 
+
+function testSingletonAndGC()
+	local world = SingletonWorld.new("chaos");
+	print("new world tag:"..world:getTag())
+	world = nil
+	collectgarbage()
+
+	local world = SingletonWorld.getInstance();
+	print("singleton world tag:"..world:getTag())
+	world = nil
+	collectgarbage()
+
+
+	local world = SingletonWorld.newInstance("new instance");
+	print("new world instance tag:"..world:getTag())
+	world = nil
+	collectgarbage()
+
+	local world=SingletonWorld.managedInstance("managed instance");
+	print("managed world instance tag:"..world:getTag())
+	world = nil
+	collectgarbage()
+end
+
+
 print ("\n\n-- 1 --. Test auto GC\n")
 testAutoGC();
 
@@ -79,9 +104,15 @@ testAwesomeMod ();
 print ("\n\n-- 4 --. Test others\n")
 print ("pi = " .. pi .. "\n")
 
-print ("\n\n-- 3 --. Test Callback\n")
+print ("\n\n-- 5 --. Test Callback\n")
 testCallback();
 
 print ("\n>>>>" .. collectgarbage ("count"))
 collectgarbage ()
 print ("\n<<<<" .. collectgarbage ("count"))
+
+print("\n\n-- 6 --. Test Singleton and GC\n")
+testSingletonAndGC()
+print("\n>>>>"..collectgarbage("count"))
+collectgarbage()
+print("\n<<<<"..collectgarbage("count"))
