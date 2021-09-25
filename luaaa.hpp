@@ -38,6 +38,15 @@ inline void luaL_setfuncs(lua_State *L, const luaL_Reg *l, int nup) {
 #	define USE_NEW_MODULE_REGISTRY 0
 #endif
 
+#if defined(_MSC_VER)
+#   define RTTI_CLASS_NAME(a) typeid(a).name() //vc always has this operator even if RTTI was disabled.
+#elif __GXX_RTTI
+#   define RTTI_CLASS_NAME(a) typeid(a).name()
+#elif _HAS_STATIC_RTTI
+#   define RTTI_CLASS_NAME(a) typeid(a).name()
+#else
+#   define RTTI_CLASS_NAME(a) "?"
+#endif
 
 #include <string>
 #include <typeinfo>
@@ -58,7 +67,7 @@ namespace LUAAA_NS
 	{
 		inline static T& get(lua_State * state, int idx)
 		{
-			luaL_argcheck(state, !LuaClass<T>::klassName.empty(), 1, (std::string("cpp class `") + typeid(T).name() + "` not export").c_str());
+			luaL_argcheck(state, !LuaClass<T>::klassName.empty(), 1, (std::string("cpp class `") + RTTI_CLASS_NAME(T) + "` not export").c_str());
 			T ** t = (T**)luaL_checkudata(state, idx, LuaClass<T>::klassName.c_str());
 			luaL_argcheck(state, t != NULL, 1, "invalid user data");
 			luaL_argcheck(state, *t != NULL, 1, "invalid user data");
@@ -368,6 +377,17 @@ namespace LUAAA_NS
 	//========================================================
 	// non-member function caller & static member function caller
 	//========================================================
+    inline int descParamIndex(const int count, const int skips, int * num) {
+#if defined(__clang__)
+        int ret = (count - (*num) + 1) + skips;
+        (*num) = (*num) - 1;
+        return ret;
+#else
+        int ret = (*num) + skips;
+        (*num) = (*num) - 1;
+        return ret;
+#endif
+    }
 
 #define IMPLEMENT_FUNCTION_CALLER(CALLERNAME, CALLCONV, SKIPPARAM) \
 	template<typename TRET, typename ...ARGS> \
@@ -382,8 +402,8 @@ namespace LUAAA_NS
 				luaL_argcheck(state, calleePtr, 1, "cpp closure function not found."); \
 				if (calleePtr) \
 				{ \
-					volatile int idx = sizeof...(ARGS) + SKIPPARAM; (void)(idx); \
-					LuaStackReturn<TRET>(state, (*(FTYPE*)(calleePtr))((LuaStack<ARGS>::get(state, idx--))...)); \
+					int idx = sizeof...(ARGS); (void)(idx); \
+					LuaStackReturn<TRET>(state, (*(FTYPE*)(calleePtr))((LuaStack<ARGS>::get(state, descParamIndex(sizeof...(ARGS), SKIPPARAM, &idx)))...)); \
 					return 1; \
 				} \
 				return 0; \
@@ -403,8 +423,8 @@ namespace LUAAA_NS
 				luaL_argcheck(state, calleePtr, 1, "cpp closure function not found."); \
 				if (calleePtr) \
 				{ \
-					volatile int idx = sizeof...(ARGS) + SKIPPARAM; (void)(idx); \
-					(*(FTYPE*)(calleePtr))((LuaStack<ARGS>::get(state, idx--))...); \
+					int idx = sizeof...(ARGS); (void)(idx); \
+					(*(FTYPE*)(calleePtr))((LuaStack<ARGS>::get(state, descParamIndex(sizeof...(ARGS), SKIPPARAM, &idx)))...); \
 				} \
 				return 0; \
 			} \
@@ -440,7 +460,12 @@ namespace LUAAA_NS
 	IMPLEMENT_FUNCTION_CALLER(MemberFunctionCaller, __vectorcall, 1);
 	IMPLEMENT_CALLBACK_INVOKER(__vectorcall);
 #	endif
-
+#elif defined(__clang__)
+#	define _NOTHING
+    IMPLEMENT_FUNCTION_CALLER(NonMemberFunctionCaller, _NOTHING, 0);
+    IMPLEMENT_FUNCTION_CALLER(MemberFunctionCaller, _NOTHING, 1);
+    IMPLEMENT_CALLBACK_INVOKER(_NOTHING);
+#	undef _NOTHING	
 #elif defined(__GNUC__)
 #	define _NOTHING
 	IMPLEMENT_FUNCTION_CALLER(NonMemberFunctionCaller, _NOTHING, 0);
@@ -470,8 +495,8 @@ namespace LUAAA_NS
 				luaL_argcheck(state, calleePtr, 1, "cpp closure function not found.");
 				if (calleePtr)
 				{
-					volatile int idx = sizeof...(ARGS) + 1; (void)(idx);
-					LuaStackReturn<TRET>(state, (LuaStack<TCLASS>::get(state, 1).**(FTYPE*)(calleePtr))(LuaStack<ARGS>::get(state, idx--)...));
+					int idx = sizeof...(ARGS); (void)(idx);
+					LuaStackReturn<TRET>(state, (LuaStack<TCLASS>::get(state, 1).**(FTYPE*)(calleePtr))(LuaStack<ARGS>::get(state, descParamIndex(sizeof...(ARGS), 1, &idx))...));
 					return 1;
 				}
 				return 0;
@@ -492,8 +517,8 @@ namespace LUAAA_NS
 				luaL_argcheck(state, calleePtr, 1, "cpp closure function not found.");
 				if (calleePtr)
 				{
-					volatile int idx = sizeof...(ARGS) + 1; (void)(idx);
-					LuaStackReturn<TRET>(state, (LuaStack<TCLASS>::get(state, 1).**(FTYPE*)(calleePtr))(LuaStack<ARGS>::get(state, idx--)...));
+					int idx = sizeof...(ARGS); (void)(idx);
+					LuaStackReturn<TRET>(state, (LuaStack<TCLASS>::get(state, 1).**(FTYPE*)(calleePtr))(LuaStack<ARGS>::get(state, descParamIndex(sizeof...(ARGS), 1, &idx))...));
 					return 1;
 				}
 				return 0;
@@ -514,8 +539,8 @@ namespace LUAAA_NS
 				luaL_argcheck(state, calleePtr, 1, "cpp closure function not found.");
 				if (calleePtr)
 				{
-					volatile int idx = sizeof...(ARGS) + 1; (void)(idx);
-					(LuaStack<TCLASS>::get(state, 1).**(FTYPE*)(calleePtr))(LuaStack<ARGS>::get(state, idx--)...);
+					int idx = sizeof...(ARGS); (void)(idx);
+					(LuaStack<TCLASS>::get(state, 1).**(FTYPE*)(calleePtr))(LuaStack<ARGS>::get(state, descParamIndex(sizeof...(ARGS), 1, &idx))...);
 				}
 				return 0;
 			}
@@ -535,8 +560,8 @@ namespace LUAAA_NS
 				luaL_argcheck(state, calleePtr, 1, "cpp closure function not found.");
 				if (calleePtr)
 				{
-					volatile int idx = sizeof...(ARGS) + 1; (void)(idx);
-					(LuaStack<TCLASS>::get(state, 1).**(FTYPE*)(calleePtr))(LuaStack<ARGS>::get(state, idx--)...);
+					int idx = sizeof...(ARGS); (void)(idx);
+					(LuaStack<TCLASS>::get(state, 1).**(FTYPE*)(calleePtr))(LuaStack<ARGS>::get(state, descParamIndex(sizeof...(ARGS), 1, &idx))...);
 				}
 				return 0;
 			}
@@ -1055,12 +1080,12 @@ namespace LUAAA_NS
 	template <typename TCLASS>
 	struct LuaClass
 	{
-        template<typename TCLASS, bool> friend struct DestructorHelperClass;
+         friend struct DestructorHelperClass<TCLASS>;
 	public:
 		LuaClass(lua_State * state, const std::string& name, const luaL_Reg * functions = nullptr)
 			: m_state(state)
 		{
-			luaL_argcheck(state, (klassName.empty() || klassName == name), 1, (std::string("C++ class `") + typeid(TCLASS).name() + "` bind to conflict lua name `" + name + "`, origin name: " + klassName).c_str());
+			luaL_argcheck(state, (klassName.empty() || klassName == name), 1, (std::string("C++ class `") + RTTI_CLASS_NAME(TCLASS) + "` bind to conflict lua name `" + name + "`, origin name: " + klassName).c_str());
 
 			klassName = name;
 
@@ -1317,12 +1342,12 @@ namespace LUAAA_NS
         }
 
         template<typename ...ARGS>
-        inline LuaClass<TCLASS>& ctor(const char * name, TCLASS*(*spawner)(ARGS...), nullptr_t) {
+        inline LuaClass<TCLASS>& ctor(const char * name, TCLASS*(*spawner)(ARGS...), std::nullptr_t) {
             typedef decltype(spawner) SPAWNERFTYPE;
 
             struct HelperClass {
                 static int f__nogc(lua_State* state) {
-                    //std::cout << "ctor(const char * name, TCLASS*(*spawner)(ARGS...), nullptr_t):f__nogc" << std::endl;
+                    //std::cout << "ctor(const char * name, TCLASS*(*spawner)(ARGS...), std::nullptr_t):f__nogc" << std::endl;
                     return 0;
                 }
 
@@ -1396,17 +1421,17 @@ namespace LUAAA_NS
 
         template<typename ...ARGS>
         inline LuaClass<TCLASS>& ctor(const std::string& name, TCLASS*(*spawner)(ARGS...)) {
-            return ctor<F>(name.c_str(), spawner);
+            return ctor(name.c_str(), spawner);
         }
 
         template<typename TRET, typename ...ARGS>
         inline LuaClass<TCLASS>& ctor(const std::string& name, TCLASS*(*spawner)(ARGS...), TRET(*deleter)(TCLASS*)) {
-            return ctor<F, D>(name.c_str(), spawner, deleter);
+            return ctor(name.c_str(), spawner, deleter);
         }
 
         template<typename ...ARGS>
-        inline LuaClass<TCLASS>& ctor(const std::string& name, TCLASS*(*spawner)(ARGS...), nullptr_t) {
-            return ctor<F, D>(name.c_str(), spawner, nullptr);
+        inline LuaClass<TCLASS>& ctor(const std::string& name, TCLASS*(*spawner)(ARGS...), std::nullptr_t) {
+            return ctor(name.c_str(), spawner, nullptr);
         }
 
 		template<typename F>

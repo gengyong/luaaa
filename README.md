@@ -93,7 +93,6 @@ and delete function must accept one instance pointer which to be collect back or
 ----
 ***Breaking Changes***
 **Always** define **at least one** 'ctor' for a LuaClass.
-
 in previous version, a default 'ctor' was defined in LuaClass constructor, default 'ctor' call default C++ class constructor, and register C++ class destructor as gc function. 
 In some case, this default 'ctor' is not fit requirements or is invalid, for example, singleton class declare constructor/destructor as protected/private methods, in this case, default 'ctor' don't works, a custom 'ctor' is required here. 
 in current version, the default 'ctor' was removed from LuaClass constructor, so user must provide a 'ctor' in binding codes otherwise the LuaClass cannot be instantiate in lua.

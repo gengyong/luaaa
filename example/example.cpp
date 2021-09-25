@@ -161,6 +161,11 @@ public:
 		LOG("%s is getting fatter.\n", m_name.c_str());
 	}
 
+    void test(int a, const std::string& b, float c, const std::string& d, const std::string& e)
+    {
+        LOG("cat test: got params from lua: [0: %d, 1:%s, 2:%f, 3:%s, 4:%s]\n", a, b.c_str(), c, d.c_str(), e.c_str());
+    }
+
 	std::string toString() const
 	{ 
 		std::stringstream result;
@@ -262,10 +267,14 @@ void testMapMap(const std::map<std::string, std::map<std::string, std::string>>&
 	LOG("\n--------------------------\n");
 }
 
-
-void testCallback(int (*f)(const std::string&, int, float), int val)
+void testMultipleParams(int a, int b, const std::string& c, float d, double e)
 {
-	auto result = f("a string from c++", val, 1.2345678f);
+    LOG("c++ testCallback: got params from lua: [0: %d, 1:%d, 2:%s, 3:%f, 4:%g]\n", a, b, c.c_str(), d, e);
+}
+
+void testCallback(int (*f)(const std::string&, int, float), int val, const std::string& str)
+{
+	auto result = f("a string from c++:" + str, val, 1.2345678f);
 	LOG("c++ testCallback: got result from lua callback: %d\n", result);
 }
 
@@ -285,6 +294,7 @@ void bindToLUA(lua_State * L)
 	luaCat.fun("setAge", &Cat::setAge);
 	luaCat.fun("getAge", &Cat::getAge);
 	luaCat.fun("eat", &Cat::eat);
+    luaCat.fun("test", &Cat::test);
 	luaCat.fun("speak", &Cat::speak);
 	luaCat.fun("__tostring", &Cat::toString);
 	luaCat.def("tag", "Animal");
@@ -318,6 +328,7 @@ void bindToLUA(lua_State * L)
 	awesomeMod.fun("testSet", testSet);
 	awesomeMod.fun("testSetSet", testSetSet);
 	awesomeMod.fun("testMapMap", testMapMap);
+    awesomeMod.fun("testMultipleParams", testMultipleParams);
 	awesomeMod.fun("testCallback", testCallback);
 
 

@@ -6,6 +6,7 @@ function testAwesomeCat()
 	print(a)
 	a:eat({"fish", "milk", "cookie", "rice"});
 	print(a)
+	a:test(0, 1, 2, 3, 4)
 	a:speak("Thanks!")
 end
 
@@ -43,6 +44,9 @@ function testAwesomeMod()
 		}
 	});
 
+	print("-------- AwesomeMod.testMultipleParams() --------")
+	AwesomeMod.testMultipleParams(0,1,"two",3.3,44.44)
+
 end
 
 
@@ -56,7 +60,7 @@ function testCallback ()
 		return b * b;
 	end
 
-	AwesomeMod.testCallback(f, 5555)
+	AwesomeMod.testCallback(f, 5555 , "lua text")
 end
 
 
