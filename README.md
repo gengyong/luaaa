@@ -11,13 +11,13 @@ Luaaa has no dependencies to other libs but lua and c++11 standard lib, no cpp f
 
 To use it, just copy and include 'luaaa.hpp' in source file.
 
-
+feel free to report bugs.
 ## Features
 
 * simple.
 * powerful.
-* no genrated wrapper codes.
-* works with lua 5.1, 5.2, 5.3 and 5.4.
+* no wrapper codes.
+* works with lua from 5.1 to 5.4.
 
 ## Quick Start
 
@@ -90,37 +90,42 @@ luaWorld.ctor("getInstance", &SingletonWorld::getInstance, nullptr);
 instance spawner and delete function can be static member function or global function,
 and delete function must accept one instance pointer which to be collect back or delete. 
 
-----
-***Breaking Changes***
-**Always** define **at least one** 'ctor' for a LuaClass.
-in previous version, a default 'ctor' was defined in LuaClass constructor, default 'ctor' call default C++ class constructor, and register C++ class destructor as gc function. 
-In some case, this default 'ctor' is not fit requirements or is invalid, for example, singleton class declare constructor/destructor as protected/private methods, in this case, default 'ctor' don't works, a custom 'ctor' is required here. 
-in current version, the default 'ctor' was removed from LuaClass constructor, so user must provide a 'ctor' in binding codes otherwise the LuaClass cannot be instantiate in lua.
+----------------------------
+### ***Breaking Changes***
+
+Always define **at least one** 'ctor' for a LuaClass.
+
+> in previous version, a default 'ctor' was generated in LuaClass constructor.  
+the default 'ctor' will call default C++ class constructor, and register C++ class destructor as gc function.  
+In some case, this default 'ctor' is not fit requirements it's invalid.  
+for example, singleton class declare constructor/destructor as protected/private methods. in this case, default 'ctor' cannot access it, so default 'ctor' doesn't work, a custom 'ctor' is required here.  
+in current version, the default 'ctor' was removed from LuaClass constructor. User must provide a 'ctor' in binding codes otherwise the LuaClass cannot be instantiate in lua.  
 In most case, just define a default 'ctor' as below:
-    ```cpp
-    LuaClass<XXX> luaCls(luaState, 'XXXname');
-    luaCls.ctor(); 
-    ```
-above codes will define a spawner named as 'new', in lua `XXXname.new()` equivalent to C++:
-	```cpp
-	new XXX();
-	```
-or change spawner name to 'create':
-	```cpp
-	luaCls.ctor("create");
-	```
-add sigature to match C++ class constructor:
-	```cpp
-	luaCls.ctor<std::string>('create');
-	```
-which defined a spawner named as 'create', in lua `XXXname.create("string param")` equivalent to C++:
-	```cpp
-	new XXX("string param");
-	```
-----
+```cpp
+LuaClass<XXX> luaCls(luaState, 'XXXname');
+luaCls.ctor(); 
+```
+> above codes will define a lua object constructor named as 'new', in lua `XXXname.new()` equivalent to C++:
+```cpp
+new XXX();
+```
+> or change constructor name to 'create':
+```cpp
+luaCls.ctor("create");
+```
+> if C++ constructor is not the default constructor, add sigature to match C++ class constructor:
+```cpp
+luaCls.ctor<std::string>('create');
+```
+> which defined a lua object constructor named as 'create', in lua `XXXname.create("string param")` equivalent to C++:
+```cpp
+new XXX("string param");
+```
+----------------------------
+
 
 static member function, global fuctions or constant can be export in module.
-module has no spawner or destructor.
+module has no constructor or destructor.
 ```cpp
 
 #include "luaaa.hpp"
@@ -152,9 +157,8 @@ LuaModule(state)
 
 ```
 
-ok, then you can access it from lua:
+ok, then access it from lua:
 ```lua
-
 -- access module members
 MyMod.func1(123)
 MyMod.func2(123, "456", 523.3)
@@ -179,58 +183,58 @@ to export c++ functions with same name, for example:
  class MyClass
  {
  public:
- 	void overrideFunc(int, int);
- 	void overrideFunc(int);
- 	bool overrideFunc();
+ 	void sameNameFunc(int, int);
+ 	void sameNameFunc(int);
+ 	bool sameNameFunc();
  };
- 
 ```
-for this case, function signature is required for c++ to know which function should be select:
+in this case, function signature is required here to know which function should be exported:
 ```cpp
 MyMod.fun("func1", (bool(*)(const std::string&)) samename);
 MyMod.fun("func2", (void(*)(int)) samename);
 
 LuaClass<MyCLass>(state, "MyClass")
-	.fun("overrideFunc1", (void(MyClass::*)(int, int)) &MyClass::overrideFunc)
-	.fun("overrideFunc2", (void(MyClass::*)(int) &MyClass::overrideFunc))
-	.fun("overrideFunc3", (bool(MyClass::*)() &MyClass::overrideFunc));
+	.fun("sameNameFunc1", (void(MyClass::*)(int, int)) &MyClass::sameNameFunc)
+	.fun("sameNameFunc2", (void(MyClass::*)(int) &MyClass::sameNameFunc))
+	.fun("sameNameFunc3", (bool(MyClass::*)() &MyClass::sameNameFunc));
 ```
+
+## Advanced Topic
 
 
 
 ## Run Example
 
-### Linux
+### 1. Linux / Unix / Macos
 
 1. install lua dev libs
 ```bash
-$ sudo apt install lua5.1-0-dev
+# debian/ubuntu
+$ sudo apt install lua5.4-0-dev
+# redhat/centos/fedora
+$ sudo yum install lua5.4-0-dev
 ```
+
 
 2. build & run.
 ```bash
 $ cd example
-$ g++ -std=c++11  example.cpp -I/usr/include/lua5.1 -o example -g -lstdc++ -llua5.1
+$ g++ -std=c++11  example.cpp -I/usr/include/lua5.4 -o example -g -lstdc++ -llua5.4
 $ ./example
 ```
 
 or use LLVM:
 ```bash
 $ cd example
-$ clang -std=c++11  example.cpp -I/usr/include/lua5.1 -o example -g -lstdc++ -llua5.1
+$ clang -std=c++11  example.cpp -I/usr/include/lua5.4 -o example -g -lstdc++ -llua5.4
 $ ./example
 ```
 
 
-### Visual C++
+### 2. Visual C++
 
 Of course you know how to do it.
 
-## Documents
-
-TBD.
-
-feel free to report bugs.
 
 ## License
 
