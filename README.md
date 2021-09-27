@@ -210,23 +210,23 @@ LuaClass<MyCLass>(state, "MyClass")
 1. install lua dev libs
 ```bash
 # debian/ubuntu
-$ sudo apt install lua5.4-0-dev
+$ sudo apt install lua5.3-dev
 # redhat/centos/fedora
-$ sudo yum install lua5.4-0-dev
+$ sudo yum install lua5.3-dev
 ```
 
 
 2. build & run.
 ```bash
 $ cd example
-$ g++ -std=c++11  example.cpp -I/usr/include/lua5.4 -o example -g -lstdc++ -llua5.4
+$ g++ -std=c++11  example.cpp -I/usr/include/lua5.3 -o example -g -lstdc++ -llua5.3
 $ ./example
 ```
 
 or use LLVM:
 ```bash
 $ cd example
-$ clang -std=c++11  example.cpp -I/usr/include/lua5.4 -o example -g -lstdc++ -llua5.4
+$ clang -std=c++11  example.cpp -I/usr/include/lua5.3 -o example -g -lstdc++ -llua5.3
 $ ./example
 ```
 

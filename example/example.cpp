@@ -10,31 +10,7 @@
 
 #define LOG printf
 
-inline void DUMP(lua_State * state, const std::string name = "") {
-    printf(">>>>>>>>>>>>>>>>>>>>>>>>>[%s]\n", name.c_str());
-    int top = lua_gettop(state);
-    for (int i = 1; i <= top; i++) {
-        printf("%d\t%s\t", i, luaL_typename(state, i));
-        switch (lua_type(state, i)) {
-        case LUA_TNUMBER:
-            printf("%g\n", lua_tonumber(state, i));
-            break;
-        case LUA_TSTRING:
-            printf("%s\n", lua_tostring(state, i));
-            break;
-        case LUA_TBOOLEAN:
-            printf("%s\n", (lua_toboolean(state, i) ? "true" : "false"));
-            break;
-        case LUA_TNIL:
-            printf("%s\n", "nil");
-            break;
-        default:
-            printf("%p\n", lua_topointer(state, i));
-            break;
-        }
-    }
-    printf("<<<<<<<<<<<<<<<<<<<<<<<<<\n");
-}
+
 
 void bindToLUA(lua_State *);
 
@@ -184,6 +160,7 @@ private:
 	float m_weight;
 };
 
+
 class SingletonWorld 
 {
 public:
@@ -220,17 +197,35 @@ private:
     std::string mTag;
 };
 
+class Position {
+public:
+    float x;
+    float y;
+    float z;
+
+    Position():x(0), y(0), z(0) {}
+    Position(float fx, float fy, float fz):x(fx), y(fy), z(fz) {}
+};
+
+
+
 //===============================================================================
 // example c functions
 //===============================================================================
-void testSet(const std::set<int>& s)
+void testSet(const std::set<int>& s1, const std::set<int>& s2)
 {
-	LOG("testSet: set<int> size: %lu\n", s.size());
+	LOG("testSet: set<int> size: s1:%lu s2:%lu\n", s1.size(), s2.size());
 	LOG("--------------------------\n");
-	for (auto it = s.begin(); it != s.end(); ++it)
+    LOG("s1:");
+	for (auto it = s1.begin(); it != s1.end(); ++it)
 	{
 		LOG("%d ", *it);
 	}
+    LOG("\ns2:");
+    for (auto it = s2.begin(); it != s2.end(); ++it)
+    {
+        LOG("%d ", *it);
+    }
 	LOG("\n--------------------------\n");
 }
 
@@ -267,6 +262,8 @@ void testMapMap(const std::map<std::string, std::map<std::string, std::string>>&
 	LOG("\n--------------------------\n");
 }
 
+
+
 void testMultipleParams(int a, int b, const std::string& c, float d, double e)
 {
     LOG("c++ testCallback: got params from lua: [0: %d, 1:%d, 2:%s, 3:%f, 4:%g]\n", a, b, c.c_str(), d, e);
@@ -276,6 +273,37 @@ void testCallback(int (*f)(const std::string&, int, float), int val, const std::
 {
 	auto result = f("a string from c++:" + str, val, 1.2345678f);
 	LOG("c++ testCallback: got result from lua callback: %d\n", result);
+}
+
+
+//===============================================
+// declare custom LuaStack operators
+//===============================================
+// for GCC, it must be delcared in namespace luaaa.
+namespace luaaa {
+    template<> struct LuaStack<Position>
+    {
+        inline static Position get(lua_State * L, int idx)
+        {
+            auto dict = LuaStack<std::map<std::string, float>>::get(L, idx);
+            return Position(dict.find("x")->second, dict.find("y")->second, dict.find("z")->second);
+        }
+
+        inline static void put(lua_State * L, const Position & v)
+        {
+            std::map<std::string, float> dict;
+            dict["x"] = v.x;
+            dict["y"] = v.y;
+            dict["z"] = v.z;
+            LuaStack<decltype(dict)>::put(L, dict);
+        }
+    };
+}
+//*/
+
+Position testPosition(const Position& a, const Position& b)
+{
+    return Position(a.x + b.x, a.y + b.y, a.z + b.z);
 }
 
 
@@ -319,7 +347,9 @@ void bindToLUA(lua_State * L)
 	awesomeMod.def("cstr", "this is c string");
 
 	std::list<std::string> dict {
-		"AMICUS", "AMOS", "AMTRAK", "ANGELICA", "ANNIE OAKLEY", "BEETHOVEN", "BERTHA", "BESSEYA", "BILLIE JEAN", "BIMBO", "BISS", "DECATHLON", "DELIRIUM", "DELIUS", "DEMPSEY" 
+		"AMICUS", "AMOS", "AMTRAK", "ANGELICA", "ANNIE OAKLEY", 
+        "BEETHOVEN", "BERTHA", "BESSEYA", "BILLIE JEAN", "BIMBO", 
+        "BISS", "DECATHLON", "DELIRIUM", "DELIUS", "DEMPSEY" 
 	};
 
 	awesomeMod.def("dict", dict);
@@ -330,6 +360,7 @@ void bindToLUA(lua_State * L)
 	awesomeMod.fun("testMapMap", testMapMap);
     awesomeMod.fun("testMultipleParams", testMultipleParams);
 	awesomeMod.fun("testCallback", testCallback);
+    awesomeMod.fun("testPosition", testPosition);
 
 
 	// put something to global, just emit the module name
@@ -342,5 +373,7 @@ void bindToLUA(lua_State * L)
 	.def("max", INT_MAX)
 	.def("min", INT_MIN);
 
+
+    
 }
 

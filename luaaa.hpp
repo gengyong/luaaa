@@ -51,6 +51,33 @@ inline void luaL_setfuncs(lua_State *L, const luaL_Reg *l, int nup) {
 #include <string>
 #include <typeinfo>
 
+
+inline void DUMP(lua_State * state, const std::string name = "") {
+    printf(">>>>>>>>>>>>>>>>>>>>>>>>>[%s]\n", name.c_str());
+    int top = lua_gettop(state);
+    for (int i = 1; i <= top; i++) {
+        printf("%d\t%s\t", i, luaL_typename(state, i));
+        switch (lua_type(state, i)) {
+        case LUA_TNUMBER:
+            printf("%g\n", lua_tonumber(state, i));
+            break;
+        case LUA_TSTRING:
+            printf("%s\n", lua_tostring(state, i));
+            break;
+        case LUA_TBOOLEAN:
+            printf("%s\n", (lua_toboolean(state, i) ? "true" : "false"));
+            break;
+        case LUA_TNIL:
+            printf("%s\n", "nil");
+            break;
+        default:
+            printf("%p\n", lua_topointer(state, i));
+            break;
+        }
+    }
+    printf("<<<<<<<<<<<<<<<<<<<<<<<<<\n");
+}
+
 namespace LUAAA_NS
 {
     //========================================================
@@ -377,20 +404,21 @@ namespace LUAAA_NS
 	//========================================================
 	// non-member function caller & static member function caller
 	//========================================================
-    inline int descParamIndex(const int count, const int skips, int * num) {
+
+    template<typename TRET>
+    inline TRET stackOperatorCaller(lua_State* state, TRET(*getter)(lua_State*, int), const int count, const int skip, int * pidx)
+    {
 #if defined(__clang__)
-        int ret = (count - (*num) + 1) + skips;
-        (*num) = (*num) - 1;
-        return ret;
+        int offset = (*pidx) + skip + 1;
 #else
-        int ret = (*num) + skips;
-        (*num) = (*num) - 1;
-        return ret;
+        int offset = (count - (*pidx)) + skip;
 #endif
+        ++(*pidx);
+        return (*getter)(state, offset);
     }
 
 #define IMPLEMENT_FUNCTION_CALLER(CALLERNAME, CALLCONV, SKIPPARAM) \
-	template<typename TRET, typename ...ARGS> \
+    template<typename TRET, typename ...ARGS> \
 	lua_CFunction CALLERNAME(TRET(CALLCONV*func)(ARGS...)) \
 	{ \
 		typedef decltype(func) FTYPE; (void)(func); \
@@ -402,8 +430,8 @@ namespace LUAAA_NS
 				luaL_argcheck(state, calleePtr, 1, "cpp closure function not found."); \
 				if (calleePtr) \
 				{ \
-					int idx = sizeof...(ARGS); (void)(idx); \
-					LuaStackReturn<TRET>(state, (*(FTYPE*)(calleePtr))((LuaStack<ARGS>::get(state, descParamIndex(sizeof...(ARGS), SKIPPARAM, &idx)))...)); \
+					int idx = 0; (void)(idx); \
+					LuaStackReturn<TRET>(state, (*(FTYPE*)(calleePtr))(stackOperatorCaller(state, LuaStack<ARGS>::get, sizeof...(ARGS), SKIPPARAM, &idx)...)); \
 					return 1; \
 				} \
 				return 0; \
@@ -423,15 +451,15 @@ namespace LUAAA_NS
 				luaL_argcheck(state, calleePtr, 1, "cpp closure function not found."); \
 				if (calleePtr) \
 				{ \
-					int idx = sizeof...(ARGS); (void)(idx); \
-					(*(FTYPE*)(calleePtr))((LuaStack<ARGS>::get(state, descParamIndex(sizeof...(ARGS), SKIPPARAM, &idx)))...); \
+					int idx = 0; (void)(idx); \
+					(*(FTYPE*)(calleePtr))(stackOperatorCaller(state, LuaStack<ARGS>::get, sizeof...(ARGS), SKIPPARAM, &idx)...); \
 				} \
 				return 0; \
 			} \
 		}; \
 		return HelperClass::Invoke; \
 	}
-	
+
 #if defined(_MSC_VER)	
 	IMPLEMENT_FUNCTION_CALLER(NonMemberFunctionCaller, __cdecl, 0);
 	IMPLEMENT_FUNCTION_CALLER(MemberFunctionCaller, __cdecl, 1);
@@ -483,92 +511,92 @@ namespace LUAAA_NS
 	//========================================================
 	// member function invoker
 	//========================================================
-	template<typename TCLASS, typename TRET, typename ...ARGS>
-	lua_CFunction MemberFunctionCaller(TRET(TCLASS::*func)(ARGS...))
-	{
-		typedef decltype(func) FTYPE; (void)(func);
-		struct HelperClass
-		{
-			static int Invoke(lua_State* state)
-			{
-				void * calleePtr = lua_touserdata(state, lua_upvalueindex(1));
-				luaL_argcheck(state, calleePtr, 1, "cpp closure function not found.");
-				if (calleePtr)
-				{
-					int idx = sizeof...(ARGS); (void)(idx);
-					LuaStackReturn<TRET>(state, (LuaStack<TCLASS>::get(state, 1).**(FTYPE*)(calleePtr))(LuaStack<ARGS>::get(state, descParamIndex(sizeof...(ARGS), 1, &idx))...));
-					return 1;
-				}
-				return 0;
-			}
-		};
-		return HelperClass::Invoke;
-	}
+    template<typename TCLASS, typename TRET, typename ...ARGS>
+    lua_CFunction MemberFunctionCaller(TRET(TCLASS::*func)(ARGS...))
+    {
+        typedef decltype(func) FTYPE; (void)(func);
+        struct HelperClass
+        {
+            static int Invoke(lua_State* state)
+            {
+                void * calleePtr = lua_touserdata(state, lua_upvalueindex(1));
+                luaL_argcheck(state, calleePtr, 1, "cpp closure function not found.");
+                if (calleePtr)
+                {
+                    int idx = 0; (void)(idx);
+                    LuaStackReturn<TRET>(state, (LuaStack<TCLASS>::get(state, 1).**(FTYPE*)(calleePtr))(stackOperatorCaller(state, LuaStack<ARGS>::get, sizeof...(ARGS), 1, &idx)...));
+                    return 1;
+                }
+                return 0;
+            }
+        };
+        return HelperClass::Invoke;
+    }
 
-	template<typename TCLASS, typename TRET, typename ...ARGS>
-	lua_CFunction MemberFunctionCaller(TRET(TCLASS::*func)(ARGS...)const)
-	{
-		typedef decltype(func) FTYPE; (void)(func);
-		struct HelperClass
-		{
-			static int Invoke(lua_State* state)
-			{
-				void * calleePtr = lua_touserdata(state, lua_upvalueindex(1));
-				luaL_argcheck(state, calleePtr, 1, "cpp closure function not found.");
-				if (calleePtr)
-				{
-					int idx = sizeof...(ARGS); (void)(idx);
-					LuaStackReturn<TRET>(state, (LuaStack<TCLASS>::get(state, 1).**(FTYPE*)(calleePtr))(LuaStack<ARGS>::get(state, descParamIndex(sizeof...(ARGS), 1, &idx))...));
-					return 1;
-				}
-				return 0;
-			}
-		};
-		return HelperClass::Invoke;
-	}
+    template<typename TCLASS, typename TRET, typename ...ARGS>
+    lua_CFunction MemberFunctionCaller(TRET(TCLASS::*func)(ARGS...)const)
+    {
+        typedef decltype(func) FTYPE; (void)(func);
+        struct HelperClass
+        {
+            static int Invoke(lua_State* state)
+            {
+                void * calleePtr = lua_touserdata(state, lua_upvalueindex(1));
+                luaL_argcheck(state, calleePtr, 1, "cpp closure function not found.");
+                if (calleePtr)
+                {
+                    int idx = 0; (void)(idx);
+                    LuaStackReturn<TRET>(state, (LuaStack<TCLASS>::get(state, 1).**(FTYPE*)(calleePtr))(stackOperatorCaller(state, LuaStack<ARGS>::get, sizeof...(ARGS), 1, &idx)...));
+                    return 1;
+                }
+                return 0;
+            }
+        };
+        return HelperClass::Invoke;
+    }
 
-	template<typename TCLASS, typename ...ARGS>
-	lua_CFunction MemberFunctionCaller(void(TCLASS::*func)(ARGS...))
-	{
-		typedef decltype(func) FTYPE; (void)(func);
-		struct HelperClass
-		{
-			static int Invoke(lua_State* state)
-			{
-				void * calleePtr = lua_touserdata(state, lua_upvalueindex(1));
-				luaL_argcheck(state, calleePtr, 1, "cpp closure function not found.");
-				if (calleePtr)
-				{
-					int idx = sizeof...(ARGS); (void)(idx);
-					(LuaStack<TCLASS>::get(state, 1).**(FTYPE*)(calleePtr))(LuaStack<ARGS>::get(state, descParamIndex(sizeof...(ARGS), 1, &idx))...);
-				}
-				return 0;
-			}
-		};
-		return HelperClass::Invoke;
-	}
+    template<typename TCLASS, typename ...ARGS>
+    lua_CFunction MemberFunctionCaller(void(TCLASS::*func)(ARGS...))
+    {
+        typedef decltype(func) FTYPE; (void)(func);
+        struct HelperClass
+        {
+            static int Invoke(lua_State* state)
+            {
+                void * calleePtr = lua_touserdata(state, lua_upvalueindex(1));
+                luaL_argcheck(state, calleePtr, 1, "cpp closure function not found.");
+                if (calleePtr)
+                {
+                    int idx = 0; (void)(idx);
+                    (LuaStack<TCLASS>::get(state, 1).**(FTYPE*)(calleePtr))(stackOperatorCaller(state, LuaStack<ARGS>::get, sizeof...(ARGS), 1, &idx)...);
+                }
+                return 0;
+            }
+        };
+        return HelperClass::Invoke;
+    }
 
-	template<typename TCLASS, typename ...ARGS>
-	lua_CFunction MemberFunctionCaller(void(TCLASS::*func)(ARGS...)const)
-	{
-		typedef decltype(func) FTYPE; (void)(func);
-		struct HelperClass
-		{
-			static int Invoke(lua_State* state)
-			{
-				void * calleePtr = lua_touserdata(state, lua_upvalueindex(1));
-				luaL_argcheck(state, calleePtr, 1, "cpp closure function not found.");
-				if (calleePtr)
-				{
-					int idx = sizeof...(ARGS); (void)(idx);
-					(LuaStack<TCLASS>::get(state, 1).**(FTYPE*)(calleePtr))(LuaStack<ARGS>::get(state, descParamIndex(sizeof...(ARGS), 1, &idx))...);
-				}
-				return 0;
-			}
-		};
-		return HelperClass::Invoke;
-	}
-	
+    template<typename TCLASS, typename ...ARGS>
+    lua_CFunction MemberFunctionCaller(void(TCLASS::*func)(ARGS...)const)
+    {
+        typedef decltype(func) FTYPE; (void)(func);
+        struct HelperClass
+        {
+            static int Invoke(lua_State* state)
+            {
+                void * calleePtr = lua_touserdata(state, lua_upvalueindex(1));
+                luaL_argcheck(state, calleePtr, 1, "cpp closure function not found.");
+                if (calleePtr)
+                {
+                    int idx = 0; (void)(idx);
+                    (LuaStack<TCLASS>::get(state, 1).**(FTYPE*)(calleePtr))(stackOperatorCaller(state, LuaStack<ARGS>::get, sizeof...(ARGS), 1, &idx)...);
+                }
+                return 0;
+            }
+        };
+        return HelperClass::Invoke;
+    }
+    
 	//========================================================
 	// constructor invoker
 	//========================================================
@@ -578,8 +606,8 @@ namespace LUAAA_NS
 		static TCLASS * Invoke(lua_State * state)
 		{
 			(void)(state);
-			volatile int idx = sizeof...(ARGS); (void)(idx);
-			return new TCLASS((LuaStack<ARGS>::get(state, idx--))...);
+			int idx = 0; (void)(idx);
+			return new TCLASS(stackOperatorCaller(state, LuaStack<ARGS>::get, sizeof...(ARGS), 0, &idx)...);
 		}
 	};
 }
@@ -611,8 +639,8 @@ namespace LUAAA_NS
 				int index = 0;
 				lua_pushnil(L);
 				while (0 != lua_next(L, idx) && index < N)
-				{
-					result[index++] = LuaStack<typename Container::value_type>::get(L, idx + 2);
+				{					
+                    result[index++] = LuaStack<typename Container::value_type>::get(L, lua_gettop(L));
 					lua_pop(L, 1);
 				}
 				lua_pop(L, 0);
@@ -645,7 +673,7 @@ namespace LUAAA_NS
 				lua_pushnil(L);
 				while (0 != lua_next(L, idx))
 				{
-					result.push_back(LuaStack<typename Container::value_type>::get(L, idx + 2));
+                    result.push_back(LuaStack<typename Container::value_type>::get(L, lua_gettop(L)));
 					lua_pop(L, 1);
 				}
 				lua_pop(L, 0);
@@ -678,7 +706,7 @@ namespace LUAAA_NS
 				lua_pushnil(L);
 				while (0 != lua_next(L, idx))
 				{
-					result.push_back(LuaStack<typename Container::value_type>::get(L, idx + 2));
+                    result.push_back(LuaStack<typename Container::value_type>::get(L, lua_gettop(L)));
 					lua_pop(L, 1);
 				}
 				lua_pop(L, 0);
@@ -711,7 +739,7 @@ namespace LUAAA_NS
 				lua_pushnil(L);
 				while (0 != lua_next(L, idx))
 				{
-					result.push_back(LuaStack<typename Container::value_type>::get(L, idx + 2));
+                    result.push_back(LuaStack<typename Container::value_type>::get(L, lua_gettop(L)));
 					lua_pop(L, 1);
 				}
 				lua_pop(L, 0);
@@ -744,7 +772,7 @@ namespace LUAAA_NS
 				lua_pushnil(L);
 				while (0 != lua_next(L, idx))
 				{
-					result.push_back(LuaStack<typename Container::value_type>::get(L, idx + 2));
+                    result.push_back(LuaStack<typename Container::value_type>::get(L, lua_gettop(L)));
 					lua_pop(L, 1);
 				}
 				lua_pop(L, 0);
@@ -777,7 +805,7 @@ namespace LUAAA_NS
 				lua_pushnil(L);
 				while (0 != lua_next(L, idx))
 				{
-					result.insert(LuaStack<typename Container::value_type>::get(L, idx + 2));
+                    result.insert(LuaStack<typename Container::value_type>::get(L, lua_gettop(L)));
 					lua_pop(L, 1);
 				}
 				lua_pop(L, 0);
@@ -810,7 +838,7 @@ namespace LUAAA_NS
 				lua_pushnil(L);
 				while (0 != lua_next(L, idx))
 				{
-					result.insert(LuaStack<typename Container::value_type>::get(L, idx + 2));
+                    result.insert(LuaStack<typename Container::value_type>::get(L, lua_gettop(L)));
 					lua_pop(L, 1);
 				}
 				lua_pop(L, 0);
@@ -843,7 +871,7 @@ namespace LUAAA_NS
 				lua_pushnil(L);
 				while (0 != lua_next(L, idx))
 				{
-					result.insert(LuaStack<typename Container::value_type>::get(L, idx + 2));
+                    result.insert(LuaStack<typename Container::value_type>::get(L, lua_gettop(L)));
 					lua_pop(L, 1);
 				}
 				lua_pop(L, 0);
@@ -877,7 +905,7 @@ namespace LUAAA_NS
 				lua_pushnil(L);
 				while (0 != lua_next(L, idx))
 				{
-					result.insert(LuaStack<typename Container::value_type>::get(L, idx + 2));
+                    result.insert(LuaStack<typename Container::value_type>::get(L, lua_gettop(L)));
 					lua_pop(L, 1);
 				}
 				lua_pop(L, 0);
@@ -911,7 +939,8 @@ namespace LUAAA_NS
 				lua_pushnil(L);
 				while (0 != lua_next(L, idx))
 				{
-					result[LuaStack<typename Container::key_type>::get(L, idx + 1)] = LuaStack<typename Container::mapped_type>::get(L, idx + 2);
+                    const int top = lua_gettop(L);
+                    result[LuaStack<typename Container::key_type>::get(L, top - 1)] = LuaStack<typename Container::mapped_type>::get(L, top);
 					lua_pop(L, 1);	
 				}
 				lua_pop(L, 0);
@@ -944,7 +973,8 @@ namespace LUAAA_NS
 				lua_pushnil(L);
 				while (0 != lua_next(L, idx))
 				{
-					result[LuaStack<typename Container::key_type>::get(L, idx + 1)] = LuaStack<typename Container::mapped_type>::get(L, idx + 2);
+                    const int top = lua_gettop(L);
+                    result[LuaStack<typename Container::key_type>::get(L, top - 1)] = LuaStack<typename Container::mapped_type>::get(L, top);
 					lua_pop(L, 1);
 				}
 				lua_pop(L, 0);
@@ -977,7 +1007,8 @@ namespace LUAAA_NS
 				lua_pushnil(L);
 				while (0 != lua_next(L, idx))
 				{
-					result[LuaStack<typename Container::key_type>::get(L, idx + 1)] = LuaStack<typename Container::mapped_type>::get(L, idx + 2);
+                    const int top = lua_gettop(L);
+					result[LuaStack<typename Container::key_type>::get(L, top - 1)] = LuaStack<typename Container::mapped_type>::get(L, top);
 					lua_pop(L, 1);
 				}
 				lua_pop(L, 0);
@@ -1010,7 +1041,8 @@ namespace LUAAA_NS
 				lua_pushnil(L);
 				while (0 != lua_next(L, idx))
 				{
-					result[LuaStack<typename Container::key_type>::get(L, idx + 1)] = LuaStack<typename Container::mapped_type>::get(L, idx + 2);
+                    const int top = lua_gettop(L);
+                    result[LuaStack<typename Container::key_type>::get(L, top - 1)] = LuaStack<typename Container::mapped_type>::get(L, top);
 					lua_pop(L, 1);
 				}
 				lua_pop(L, 0);
@@ -1113,7 +1145,6 @@ namespace LUAAA_NS
                     TCLASS ** objPtr = (TCLASS**)luaL_checkudata(state, -1, LuaClass<TCLASS>::klassName.c_str());
                     if (objPtr)
                     {
-                        //std::cout << "ctor(const char * name = 'new'):f__gc" << std::endl;
                         delete *objPtr;
                     }
                     return 0;
@@ -1151,10 +1182,6 @@ namespace LUAAA_NS
 
 			luaL_Reg constructor[] = { { name, HelperClass::f_new },{ nullptr, nullptr } };
 #if USE_NEW_MODULE_REGISTRY
-            //lua_newtable(state);
-            //luaL_setfuncs(state, regtable, nup);
-            //lua_setglobal(state, klassName);
-
             lua_getglobal(m_state, klassName.c_str());
             if (lua_isnil(m_state, -1))
             {
@@ -1178,7 +1205,6 @@ namespace LUAAA_NS
                     TCLASS ** objPtr = (TCLASS**)luaL_checkudata(state, -1, LuaClass<TCLASS>::klassName.c_str());
                     if (objPtr)
                     {
-                        //std::cout << "ctor(const char * name, F f):f__gc" << std::endl;
                         delete *objPtr;
                     }
                     return 0;
@@ -1257,7 +1283,6 @@ namespace LUAAA_NS
                         TCLASS ** objPtr = (TCLASS**)luaL_checkudata(state, -1, LuaClass<TCLASS>::klassName.c_str());
                         if (objPtr)
                         {
-                            //std::cout << "ctor(const char * name, F f, D d):f__gc" << std::endl;
                             (*(DELETERFTYPE*)(deleter))(*objPtr);
                         }
                     }
@@ -1347,7 +1372,6 @@ namespace LUAAA_NS
 
             struct HelperClass {
                 static int f__nogc(lua_State* state) {
-                    //std::cout << "ctor(const char * name, TCLASS*(*spawner)(ARGS...), std::nullptr_t):f__nogc" << std::endl;
                     return 0;
                 }
 

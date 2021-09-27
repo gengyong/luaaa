@@ -1,4 +1,33 @@
 
+function serialize(obj)
+	local lua = ""  
+	local t = type(obj)  
+	if t == "number" then  
+		lua = lua .. obj  
+	elseif t == "boolean" then  
+		lua = lua .. tostring(obj)  
+	elseif t == "string" then  
+		lua = lua ..  obj
+	elseif t == "table" then  
+		lua = lua .. "{"  
+		for k, v in pairs(obj) do  
+			lua = lua .. "[" .. serialize(k) .. "]=" .. serialize(v) .. ","  
+		end  
+		local metatable = getmetatable(obj)  
+		if metatable ~= nil and type(metatable.__index) == "table" then  
+			for k, v in pairs(metatable.__index) do  
+				lua = lua .. "[" .. serialize(k) .. "]=" .. serialize(v) .. ","  
+			end  
+		end  
+		lua = lua .. "}"
+	elseif t == "nil" then
+		lua = "nil"
+	else  
+		error("can not serialize a " .. t .. " type.")  
+	end  
+	return lua  
+end
+
 
 function testAwesomeCat()
 	local a = AwesomeCat.new ("BINGO")
@@ -6,6 +35,7 @@ function testAwesomeCat()
 	print(a)
 	a:eat({"fish", "milk", "cookie", "rice"});
 	print(a)
+	print("cat test: send params to c++: (0:0, 1:1, 2:2, 3:3, 4:4)");
 	a:test(0, 1, 2, 3, 4)
 	a:speak("Thanks!")
 end
@@ -19,7 +49,7 @@ function testAwesomeMod()
 	end
 
 	print ("-------- AwesomeMod.testSet() --------")
-	AwesomeMod.testSet({1, 2, "4", "5", 6, 7, 8, "1000", "2000"});
+	AwesomeMod.testSet({11, 12, "13", 14, "15", 16, 17, 18, "2019", "2020"}, {5, 4, 3, 2, 1});
 
 
 	print ("-------- AwesomeMod.testSetSet() --------")
@@ -47,6 +77,12 @@ function testAwesomeMod()
 	print("-------- AwesomeMod.testMultipleParams() --------")
 	AwesomeMod.testMultipleParams(0,1,"two",3.3,44.44)
 
+	print("-------- AwesomeMod.testPosition() --------")
+	local positionA = { x = 100, y = 200, z = 300 }
+	local positionB = { x = 11, y = 22, z = 33 }
+	local result = AwesomeMod.testPosition(positionA, positionB)
+	print("positionA["..serialize(positionA).."] + positionB["..serialize(positionB).."] = "..serialize(result))
+
 end
 
 
@@ -60,7 +96,7 @@ function testCallback ()
 		return b * b;
 	end
 
-	AwesomeMod.testCallback(f, 5555 , "lua text")
+	AwesomeMod.testCallback(f, 5555, "lua text")
 end
 
 
