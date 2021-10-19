@@ -230,6 +230,12 @@ $ clang -std=c++11  example.cpp -I/usr/include/lua5.3 -o example -g -lstdc++ -ll
 $ ./example
 ```
 
+for embedded device, declare 'LUAAA_WITHOUT_CPP_STDLIB' to disable c++ stdlib.
+```
+$ cd example
+$ gcc -fno-exceptions -fno-rtti -std=c++11 embedded.cpp -I/usr/include/lua5.3 -o embedded -g  -llua5.3 -DLUAAA_WITHOUT_CPP_STDLIB
+$ ./embedded
+```
 
 ### 2. Visual C++
 
