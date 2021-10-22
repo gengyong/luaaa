@@ -118,7 +118,7 @@ public:
 		return m_age; 
 	}
 
-    lua_State * eat(lua_State * L)
+    void eat(lua_State * L)
 	{
         if (lua_istable(L, -1))
         {
@@ -137,7 +137,7 @@ public:
         }
         
 		LOG("%s is getting fatter.\n", m_name);
-        return L;
+        return;
 	}
 
     void test(int a, const char * b, float c, const char * d, const char * e)

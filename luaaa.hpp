@@ -10,6 +10,7 @@
 
 #define LUAAA_NS luaaa
 
+/// set LUAAA_WITHOUT_CPP_STDLIB to disable C++ std libs. 
 //#define LUAAA_WITHOUT_CPP_STDLIB 1
 
 extern "C"
