@@ -575,7 +575,6 @@ namespace LUAAA_NS
                 luaL_argcheck(state, calleePtr, 1, "cpp closure function not found.");
                 if (calleePtr)
                 {
-                    int idx = 0; (void)(idx);
                     LuaStackReturn<TRET>(state, LuaInvokeInstanceMember<TCLASS, TRET, FTYPE, ARGS...>(state, calleePtr));
                     return 1;
                 }
@@ -597,7 +596,6 @@ namespace LUAAA_NS
                 luaL_argcheck(state, calleePtr, 1, "cpp closure function not found.");
                 if (calleePtr)
                 {
-                    int idx = 0; (void)(idx);
                     LuaStackReturn<TRET>(state, LuaInvokeInstanceMember<TCLASS, TRET, FTYPE, ARGS...>(state, calleePtr));
                     return 1;
                 }
