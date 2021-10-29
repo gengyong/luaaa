@@ -698,7 +698,7 @@ namespace LUAAA_NS
     template<typename TCLASS, bool = std::is_destructible<TCLASS>::value>
     struct DestructorCaller {
         static void Invoke(TCLASS * obj) {
-			obj->~TCLASS();
+            delete obj;
         }
     };
 
