@@ -721,12 +721,12 @@ namespace LUAAA_NS
 			: m_state(state)
 		{
             assert(state != nullptr);
-            //assert(klassName == nullptr);
+            assert(klassName == nullptr);
 
 #ifndef LUAAA_WITHOUT_CPP_STDLIB
 			luaL_argcheck(state, (klassName == nullptr), 1, (std::string("C++ class `") + RTTI_CLASS_NAME(TCLASS) + "` bind to conflict lua name `" + name + "`, origin name: " + klassName).c_str());
 #else
-            //luaL_argcheck(state, (klassName == nullptr), 1, "C++ class bind to conflict lua class name");
+            luaL_argcheck(state, (klassName == nullptr), 1, "C++ class bind to conflict lua class name");
 #endif
 
             struct HelperClass {
