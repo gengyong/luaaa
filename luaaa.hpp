@@ -458,7 +458,7 @@ namespace LUAAA_NS
 	}
 
 	template<typename FTYPE, typename ...ARGS>
-	void LuaInvokeVoid(lua_State* state, void* calleePtr, size_t skip)
+	inline void LuaInvokeVoid(lua_State* state, void* calleePtr, size_t skip)
 	{
 		LuaInvokeVoidImpl<FTYPE, ARGS...>(state, calleePtr, skip, typename make_indices<sizeof...(ARGS)>::type());
 	}
@@ -470,7 +470,7 @@ namespace LUAAA_NS
 	}
 
 	template<typename TRET, typename FTYPE, typename ...ARGS>
-	TRET LuaInvoke(lua_State* state, void* calleePtr, size_t skip)
+	inline TRET LuaInvoke(lua_State* state, void* calleePtr, size_t skip)
 	{
 		return LuaInvokeImpl<TRET, FTYPE, ARGS...>(state, calleePtr, skip, typename make_indices<sizeof...(ARGS)>::type());
 	}
@@ -574,7 +574,7 @@ namespace LUAAA_NS
 	}
 
 	template<typename TCLASS, typename TRET, typename FTYPE, typename ...ARGS>
-	TRET LuaInvokeInstanceMember(lua_State* state, void* calleePtr)
+	inline TRET LuaInvokeInstanceMember(lua_State* state, void* calleePtr)
 	{
 		return LuaInvokeInstanceMemberImpl<TCLASS, TRET, FTYPE, ARGS...>(state, calleePtr, typename make_indices<sizeof...(ARGS)>::type());
 	}
@@ -586,7 +586,7 @@ namespace LUAAA_NS
 	}
 
 	template<typename TCLASS, typename FTYPE, typename ...ARGS>
-	void LuaInvokeInstanceMemberVoid(lua_State* state, void* calleePtr)
+	inline void LuaInvokeInstanceMemberVoid(lua_State* state, void* calleePtr)
 	{
 		LuaInvokeInstanceMemberVoidImpl<TCLASS, FTYPE, ARGS...>(state, calleePtr, typename make_indices<sizeof...(ARGS)>::type());
 	}
