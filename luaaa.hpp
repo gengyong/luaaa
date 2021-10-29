@@ -688,8 +688,7 @@ namespace LUAAA_NS
 		template<std::size_t ...Ns>
 		static TCLASS * InvokeImpl(lua_State * state, indices<Ns...>)
         {
-            auto ptr = lua_newuserdata(state, sizeof(TCLASS));
-			return new (ptr) TCLASS(LuaStack<ARGS>::get(state, Ns + 1)...);
+			return new TCLASS(LuaStack<ARGS>::get(state, Ns + 1)...);
         }
     };
 
