@@ -444,14 +444,14 @@ namespace LUAAA_NS
     }
 
 	template<typename FTYPE, typename ...ARGS>
-	void LuaInvokeVoid(lua_State* state, void* calleePtr, size_t skip)
+	inline void LuaInvokeVoid(lua_State* state, void* calleePtr, size_t skip)
 	{
 		int idx = 0; (void)(idx);
 		(*(FTYPE*)(calleePtr))(stackOperatorCaller(state, LuaStack<ARGS>::get, sizeof...(ARGS), skip, &idx)...);
 	}
 
 	template<typename TRET, typename FTYPE, typename ...ARGS>
-	TRET LuaInvoke(lua_State* state, void* calleePtr, size_t skip)
+	inline TRET LuaInvoke(lua_State* state, void* calleePtr, size_t skip)
 	{
 		int idx = 0; (void)(idx);
 		return (*(FTYPE*)(calleePtr))(stackOperatorCaller(state, LuaStack<ARGS>::get, sizeof...(ARGS), skip, &idx)...);
@@ -550,14 +550,14 @@ namespace LUAAA_NS
 	// member function invoker
 	//========================================================
 	template<typename TCLASS, typename TRET, typename FTYPE, typename ...ARGS>
-	TRET LuaInvokeInstanceMember(lua_State* state, void* calleePtr)
+	inline TRET LuaInvokeInstanceMember(lua_State* state, void* calleePtr)
 	{
 		int idx = 0; (void)(idx);
 		return (LuaStack<TCLASS>::get(state, 1).**(FTYPE*)(calleePtr))(stackOperatorCaller(state, LuaStack<ARGS>::get, sizeof...(ARGS), 1, &idx)...);
 	}
 
 	template<typename TCLASS, typename FTYPE, typename ...ARGS>
-	void LuaInvokeInstanceMemberVoid(lua_State* state, void* calleePtr)
+	inline void LuaInvokeInstanceMemberVoid(lua_State* state, void* calleePtr)
 	{
 		int idx = 0; (void)(idx);
 		(LuaStack<TCLASS>::get(state, 1).**(FTYPE*)(calleePtr))(stackOperatorCaller(state, LuaStack<ARGS>::get, sizeof...(ARGS), 1, &idx)...);
