@@ -142,6 +142,14 @@ int main()
 //===============================================================================
 // example class 
 //===============================================================================
+#ifndef __PLACEMENT_NEW_INLINE
+void * operator new(size_t sz, void * p) {
+    return p;
+}
+
+void operator delete(void *, void *) noexcept {
+}
+#endif
 
 void * operator new(size_t sz) {
     return malloc(sz);

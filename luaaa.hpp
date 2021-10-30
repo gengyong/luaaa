@@ -645,20 +645,6 @@ namespace LUAAA_NS
         return HelperClass::Invoke;
     }
     
-	//========================================================
-	// constructor invoker
-	//========================================================
-    template<typename TCLASS, typename ...ARGS>
-    struct ConstructorCaller
-    {
-        static TCLASS * Invoke(lua_State * state)
-        {
-            (void)(state);
-            int idx = 0; (void)(idx);
-            return new TCLASS(stackOperatorCaller(state, LuaStack<ARGS>::get, sizeof...(ARGS), 0, &idx)...);
-        }
-    };
-
     //========================================================
     // Destructor invoker
     //========================================================
@@ -719,7 +705,6 @@ namespace LUAAA_NS
             lua_pushvalue(state, -1);
             lua_setfield(state, -2, "__index");
 
-            LUAAA_DUMP(state, LuaClass<TCLASS>::klassName);
             lua_pushvalue(state, -2);
             lua_setfield(state, -2, "$");
 
@@ -743,34 +728,29 @@ namespace LUAAA_NS
 			struct HelperClass {
                 static int f_gc(lua_State* state) {
                     TCLASS ** objPtr = (TCLASS**)luaL_checkudata(state, -1, LuaClass<TCLASS>::klassName);
-                    if (objPtr)
+                    if (objPtr && *objPtr)
                     {
-                        DestructorCaller<TCLASS>::Invoke(*objPtr);
+                        (*objPtr)->~TCLASS();
                     }
                     return 0;
                 }
 
 				static int f_new(lua_State* state) {
-					auto obj = ConstructorCaller<TCLASS, ARGS...>::Invoke(state);
-					if (obj)
-					{   
-						TCLASS ** objPtr = (TCLASS**)lua_newuserdata(state, sizeof(TCLASS*));
-						if (objPtr)
-						{
-							*objPtr = obj;
-                            luaL_Reg destructor[] = { { "__gc", HelperClass::f_gc }, { nullptr, nullptr } };
-							luaL_getmetatable(state, LuaClass<TCLASS>::klassName);
-                            luaL_setfuncs(state, destructor, 0);
-                            lua_setmetatable(state, -2);
-							return 1;
-						}
-						else
-						{
-                            DestructorCaller<TCLASS>::Invoke(obj);
-						}
-					}
-					lua_pushnil(state);			
-					return 1;
+                    TCLASS ** objPtr = (TCLASS **)lua_newuserdata(state, sizeof(TCLASS*) + sizeof(TCLASS));
+                    if (objPtr)
+                    {
+                        int idx = 0; (void)(idx);
+                        TCLASS * obj = new((void*)(objPtr + 1)) TCLASS(stackOperatorCaller(state, LuaStack<ARGS>::get, sizeof...(ARGS), 0, &idx)...);
+                        
+                        *objPtr = obj;
+                        luaL_Reg destructor[] = { { "__gc", HelperClass::f_gc },{ nullptr, nullptr } };
+                        luaL_getmetatable(state, LuaClass<TCLASS>::klassName);
+                        luaL_setfuncs(state, destructor, 0);
+                        lua_setmetatable(state, -2);
+                        return 1;
+                    }
+                    lua_pushnil(state);
+                    return 1;
 				}
 			};
 
@@ -917,7 +897,9 @@ namespace LUAAA_NS
                             }
                             else
                             {
-                                DestructorCaller<TCLASS>::Invoke(obj);
+                                if (deleter) {
+                                    (*(DELETERFTYPE*)(deleter))(obj);
+                                }
                             }
                         }
                     }
@@ -995,12 +977,7 @@ namespace LUAAA_NS
                                 lua_setmetatable(state, -2);
                                 return 1;
                             }
-                            else
-                            {
-                                DestructorCaller<TCLASS>::Invoke(obj);
-                            }
                         }
-                        
                     }
                     lua_pushnil(state);
                     return 1;
