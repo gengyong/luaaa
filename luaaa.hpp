@@ -427,34 +427,52 @@ namespace LUAAA_NS
 		} \
 	};
 
+	//========================================================
+	// index generation helper
+	//========================================================
+	template<std::size_t... Ns>
+	struct indices
+	{
+		using next = indices<Ns..., sizeof...(Ns)>;
+	};
+
+	template<std::size_t N>
+	struct make_indices
+	{
+		using type = typename make_indices<N - 1>::type::next;
+	};
+
+	template<>
+	struct make_indices<0>
+	{
+		using type = indices<>;
+	};
 
 	//========================================================
 	// non-member function caller & static member function caller
 	//========================================================
-    template<typename TRET>
-    inline TRET stackOperatorCaller(lua_State* state, TRET(*getter)(lua_State*, int), const int count, const int skip, int * pidx)
-    {
-#if defined(__clang__)
-        int offset = (*pidx) + skip + 1;
-#else
-        int offset = (count - (*pidx)) + skip;
-#endif
-        ++(*pidx);
-        return (*getter)(state, offset);
-    }
+	template<typename FTYPE, typename ...ARGS, std::size_t... Ns>
+	void LuaInvokeVoidImpl(lua_State* state, void* calleePtr, size_t skip, indices<Ns...>)
+	{
+		(*(FTYPE*)(calleePtr))(LuaStack<ARGS>::get(state, Ns + 2 + skip)...);
+	}
 
 	template<typename FTYPE, typename ...ARGS>
 	inline void LuaInvokeVoid(lua_State* state, void* calleePtr, size_t skip)
 	{
-		int idx = 0; (void)(idx);
-		(*(FTYPE*)(calleePtr))(stackOperatorCaller(state, LuaStack<ARGS>::get, sizeof...(ARGS), skip, &idx)...);
+		LuaInvokeVoidImpl<FTYPE, ARGS...>(state, calleePtr, skip, typename make_indices<sizeof...(ARGS)>::type());
+	}
+
+	template<typename TRET, typename FTYPE, typename ...ARGS, std::size_t... Ns>
+	TRET LuaInvokeImpl(lua_State* state, void* calleePtr, size_t skip, indices<Ns...>)
+	{
+		return (*(FTYPE*)(calleePtr))(LuaStack<ARGS>::get(state, Ns + 2 + skip)...);
 	}
 
 	template<typename TRET, typename FTYPE, typename ...ARGS>
 	inline TRET LuaInvoke(lua_State* state, void* calleePtr, size_t skip)
 	{
-		int idx = 0; (void)(idx);
-		return (*(FTYPE*)(calleePtr))(stackOperatorCaller(state, LuaStack<ARGS>::get, sizeof...(ARGS), skip, &idx)...);
+		return LuaInvokeImpl<TRET, FTYPE, ARGS...>(state, calleePtr, skip, typename make_indices<sizeof...(ARGS)>::type());
 	}
 
 #define IMPLEMENT_FUNCTION_CALLER(CALLERNAME, CALLCONV, SKIPPARAM) \
@@ -549,18 +567,28 @@ namespace LUAAA_NS
 	//========================================================
 	// member function invoker
 	//========================================================
+	template<typename TCLASS, typename TRET, typename FTYPE, typename ...ARGS, std::size_t... Ns>
+	TRET LuaInvokeInstanceMemberImpl(lua_State* state, void* calleePtr, indices<Ns...>)
+	{
+		return (LuaStack<TCLASS>::get(state, 1).**(FTYPE*)(calleePtr))(LuaStack<ARGS>::get(state, Ns + 2)...);
+	}
+
 	template<typename TCLASS, typename TRET, typename FTYPE, typename ...ARGS>
 	inline TRET LuaInvokeInstanceMember(lua_State* state, void* calleePtr)
 	{
-		int idx = 0; (void)(idx);
-		return (LuaStack<TCLASS>::get(state, 1).**(FTYPE*)(calleePtr))(stackOperatorCaller(state, LuaStack<ARGS>::get, sizeof...(ARGS), 1, &idx)...);
+		return LuaInvokeInstanceMemberImpl<TCLASS, TRET, FTYPE, ARGS...>(state, calleePtr, typename make_indices<sizeof...(ARGS)>::type());
+	}
+
+	template<typename TCLASS, typename FTYPE, typename ...ARGS, std::size_t... Ns>
+	void LuaInvokeInstanceMemberVoidImpl(lua_State* state, void* calleePtr, indices<Ns...>)
+	{
+		(LuaStack<TCLASS>::get(state, 1).**(FTYPE*)(calleePtr))(LuaStack<ARGS>::get(state, Ns + 2)...);
 	}
 
 	template<typename TCLASS, typename FTYPE, typename ...ARGS>
 	inline void LuaInvokeInstanceMemberVoid(lua_State* state, void* calleePtr)
 	{
-		int idx = 0; (void)(idx);
-		(LuaStack<TCLASS>::get(state, 1).**(FTYPE*)(calleePtr))(stackOperatorCaller(state, LuaStack<ARGS>::get, sizeof...(ARGS), 1, &idx)...);
+		LuaInvokeInstanceMemberVoidImpl<TCLASS, FTYPE, ARGS...>(state, calleePtr, typename make_indices<sizeof...(ARGS)>::type());
 	}
 
     template<typename TCLASS, typename TRET, typename ...ARGS>
@@ -645,6 +673,25 @@ namespace LUAAA_NS
         return HelperClass::Invoke;
     }
     
+	//========================================================
+	// constructor invoker
+	//========================================================
+	template<typename TCLASS, typename ...ARGS>
+    struct PlacementConstructorCaller
+    {
+        static TCLASS * Invoke(lua_State * state, void * mem)
+        {
+            return InvokeImpl(state, mem, typename make_indices<sizeof...(ARGS)>::type());
+        }
+
+	private:
+		template<std::size_t ...Ns>
+		static TCLASS * InvokeImpl(lua_State * state, void * mem, indices<Ns...>)
+        {
+			return new(mem) TCLASS(LuaStack<ARGS>::get(state, Ns + 1)...);
+        }
+    };
+
     //========================================================
     // Destructor invoker
     //========================================================
@@ -683,7 +730,7 @@ namespace LUAAA_NS
 #endif
 
             struct HelperClass {
-                static int f__clsgc(lua_State* state) {
+                static int f__clsgc(lua_State*) {
                     LuaClass<TCLASS>::klassName = nullptr;
                     return 0;
                 }
@@ -739,9 +786,8 @@ namespace LUAAA_NS
                     TCLASS ** objPtr = (TCLASS **)lua_newuserdata(state, sizeof(TCLASS*) + sizeof(TCLASS));
                     if (objPtr)
                     {
-                        int idx = 0; (void)(idx);
-                        TCLASS * obj = new((void*)(objPtr + 1)) TCLASS(stackOperatorCaller(state, LuaStack<ARGS>::get, sizeof...(ARGS), 0, &idx)...);
-                        
+                        TCLASS * obj = PlacementConstructorCaller<TCLASS, ARGS...>(state, (void*)(objPtr + 1));
+
                         *objPtr = obj;
                         luaL_Reg destructor[] = { { "__gc", HelperClass::f_gc },{ nullptr, nullptr } };
                         luaL_getmetatable(state, LuaClass<TCLASS>::klassName);
