@@ -14,6 +14,81 @@
 #   define strncpy strncpy_s
 #endif
 
+
+//===============================================================================
+using namespace luaaa;
+class MyType {
+public:
+    MyType() :m_dummy(0) {
+        LOG("MyType::MyType\n");
+    }
+    virtual ~MyType() {
+        LOG("MyType::~MyType\n");
+    }
+private:
+    int m_dummy;
+};
+
+class MyTypeB {
+public:
+    MyTypeB() :m_dummy(0) {
+        LOG("MyTypeB::MyTypeB\n");
+    }
+    virtual ~MyTypeB() {
+        LOG("MyTypeB::~MyTypeB\n");
+    }
+private:
+    int m_dummy;
+};
+
+void test1()
+{
+    lua_State* L = luaL_newstate();
+    LuaClass<MyType> myLuaType(L, "MyType");
+    myLuaType.ctor();
+    LOG("export MyType 1.\n");
+
+    LuaClass<MyTypeB> myLuaTypeB(L, "MyTypeB");
+    myLuaTypeB.ctor();
+    LOG("export MyTypeB 1.\n");
+
+    luaL_dostring(L, "local a = MyType.new();local b = MyTypeB.new();");
+
+    LOG("ready to close....\n");
+
+    lua_close(L);
+}
+
+void test2()
+{
+    lua_State* L = luaL_newstate();
+    LuaClass<MyType> myLuaType(L, "MyType");
+    myLuaType.ctor();
+    printf("export MyType 2.\n");
+
+    lua_gc(L, LUA_GCCOLLECT, 0);
+
+    LuaClass<MyTypeB> myLuaTypeB(L, "MyTypeB");
+    myLuaTypeB.ctor();
+    LOG("export MyTypeB 2.\n");
+
+    lua_gc(L, LUA_GCCOLLECT, 0);
+
+    luaL_dostring(L, "local a = MyType.new();local b = MyTypeB.new();");
+
+    lua_gc(L, LUA_GCCOLLECT, 0);
+
+    LOG("ready to close2....\n");
+
+    lua_close(L);
+}
+
+void testExportMoreThanOnce() {
+    test1();
+    test2();
+}
+
+//===============================================================================
 void bindToLUA(lua_State *);
 
 void runLuaExample(lua_State * ls)
@@ -26,12 +101,13 @@ void runLuaExample(lua_State * ls)
         LOG("lua err: %s", lua_tostring(ls, -1));
         lua_pop(ls, 1);
     }
-    getchar();
 }
 
 
 int main()
 {
+    testExportMoreThanOnce();
+
 	const luaL_Reg lualibs[] = {
 		{ LUA_COLIBNAME, luaopen_base },
 		{ LUA_LOADLIBNAME, luaopen_package },
@@ -61,7 +137,6 @@ int main()
 	}
 	return 0;
 }
-
 
 
 //===============================================================================

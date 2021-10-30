@@ -31,6 +31,10 @@ end
 
 function testAwesomeCat()
 	local a = AwesomeCat.new ("BINGO")
+	for key,value in pairs(getmetatable(a)) do
+		print(key, value)
+	end
+
 	a:setAge(2);
 	print(a)
 	a:eat({"fish", "milk", "cookie", "rice"});

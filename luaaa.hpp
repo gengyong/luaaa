@@ -41,6 +41,7 @@ inline void luaL_setfuncs(lua_State *L, const luaL_Reg *l, int nup) {
 #	define USE_NEW_MODULE_REGISTRY 0
 #endif
 
+#include <cstring>
 #include <typeinfo>
 #include <utility>
 
@@ -270,7 +271,6 @@ namespace LUAAA_NS
 	{
 		inline static const char * get(lua_State * L, int idx)
 		{
-                        
 			switch (lua_type(L, idx))
 			{
 			case LUA_TBOOLEAN:
@@ -631,7 +631,7 @@ namespace LUAAA_NS
             }
         };
         return HelperClass::Invoke;
-    }
+    }  
 
     template<typename TCLASS, typename ...ARGS>
     lua_CFunction MemberFunctionCaller(void(TCLASS::*func)(ARGS...))
@@ -651,7 +651,7 @@ namespace LUAAA_NS
             }
         };
         return HelperClass::Invoke;
-    }
+    }   
 
     template<typename TCLASS, typename ...ARGS>
     lua_CFunction MemberFunctionCaller(void(TCLASS::*func)(ARGS...)const)
@@ -737,19 +737,31 @@ namespace LUAAA_NS
             };
 
             size_t strBufLen = strlen(name) + 1;
-            klassName = reinterpret_cast<char *>(lua_newuserdata(state, strBufLen));
+            klassName = reinterpret_cast<char *>(lua_newuserdata(state, strBufLen + 1));
             memcpy(klassName, name, strBufLen);
 
+            klassName[strBufLen - 1] = '$';
+            klassName[strBufLen] = 0;
             luaL_newmetatable(state, klassName);
-			lua_pushvalue(state, -1);
-			lua_setfield(state, -2, "__index");
-            luaL_Reg destructor[] = { { "__gc", HelperClass::f__clsgc }, { nullptr, nullptr } };
+            luaL_Reg destructor[] = { { "__gc", HelperClass::f__clsgc },{ nullptr, nullptr } };
             luaL_setfuncs(state, destructor, 0);
+            lua_setmetatable(state, -2);
+           
+            klassName[strBufLen - 1] = 0;
+            luaL_newmetatable(state, klassName);
+            lua_pushvalue(state, -1);
+            lua_setfield(state, -2, "__index");
+
+            LUAAA_DUMP(state, LuaClass<TCLASS>::klassName);
+            lua_pushvalue(state, -2);
+            lua_setfield(state, -2, "$");
+
 			if (functions)
 			{
 				luaL_setfuncs(state, functions, 0);
 			}
-			lua_pop(state, 1);
+
+			lua_pop(state, 2);
 		}
 
 #ifndef LUAAA_WITHOUT_CPP_STDLIB
@@ -762,7 +774,6 @@ namespace LUAAA_NS
 		inline LuaClass<TCLASS>& ctor(const char * name = "new")
 		{
 			struct HelperClass {
-                
                 static int f_gc(lua_State* state) {
                     TCLASS ** objPtr = (TCLASS**)luaL_checkudata(state, -1, LuaClass<TCLASS>::klassName);
                     if (objPtr)
@@ -921,10 +932,7 @@ namespace LUAAA_NS
                             {
                                 *objPtr = obj;
 
-                                luaL_Reg destructor[] = {
-                                    { "__gc", HelperClass::f_gc },
-                                    { nullptr, nullptr }
-                                };
+                                luaL_Reg destructor[] = { { "__gc", HelperClass::f_gc }, { nullptr, nullptr } };
 
                                
                                 luaL_getmetatable(state, LuaClass<TCLASS>::klassName);
@@ -936,11 +944,8 @@ namespace LUAAA_NS
                                 luaL_argcheck(state, deleterPtr != nullptr, 1, "faild to alloc mem to store deleter for ctor meta table");
 #   endif
                                 *deleterPtr = *(DELETERFTYPE*)(deleter);
-
                                 luaL_setfuncs(state, destructor, 1);
-
                                 lua_setmetatable(state, -2);
-
                                 return 1;
                             }
                             else
