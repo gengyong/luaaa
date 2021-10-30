@@ -730,7 +730,7 @@ namespace LUAAA_NS
 #endif
 
             struct HelperClass {
-                static int f__clsgc(lua_State* state) {
+                static int f__clsgc(lua_State*) {
                     LuaClass<TCLASS>::klassName = nullptr;
                     return 0;
                 }
