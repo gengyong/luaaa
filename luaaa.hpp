@@ -454,7 +454,6 @@ namespace LUAAA_NS
 	template<typename FTYPE, typename ...ARGS, std::size_t... Ns>
 	void LuaInvokeVoidImpl(lua_State* state, void* calleePtr, size_t skip, indices<Ns...>)
 	{
-        LUAAA_DUMP(state, "3");
 		(*(FTYPE*)(calleePtr))(LuaStack<ARGS>::get(state, Ns + 1 + skip)...);
 	}
 
@@ -467,7 +466,6 @@ namespace LUAAA_NS
 	template<typename TRET, typename FTYPE, typename ...ARGS, std::size_t... Ns>
 	TRET LuaInvokeImpl(lua_State* state, void* calleePtr, size_t skip, indices<Ns...>)
 	{
-        LUAAA_DUMP(state, "4");
 		return (*(FTYPE*)(calleePtr))(LuaStack<ARGS>::get(state, Ns + 1 + skip)...);
 	}
 
@@ -572,7 +570,6 @@ namespace LUAAA_NS
 	template<typename TCLASS, typename TRET, typename FTYPE, typename ...ARGS, std::size_t... Ns>
 	TRET LuaInvokeInstanceMemberImpl(lua_State* state, void* calleePtr, indices<Ns...>)
 	{
-        LUAAA_DUMP(state, "1");
 		return (LuaStack<TCLASS>::get(state, 1).**(FTYPE*)(calleePtr))(LuaStack<ARGS>::get(state, Ns + 2)...);
 	}
 
@@ -585,7 +582,6 @@ namespace LUAAA_NS
 	template<typename TCLASS, typename FTYPE, typename ...ARGS, std::size_t... Ns>
 	void LuaInvokeInstanceMemberVoidImpl(lua_State* state, void* calleePtr, indices<Ns...>)
 	{
-        LUAAA_DUMP(state, "2");
 		(LuaStack<TCLASS>::get(state, 1).**(FTYPE*)(calleePtr))(LuaStack<ARGS>::get(state, Ns + 2)...);
 	}
 
