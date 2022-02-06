@@ -93,8 +93,8 @@ void bindToLUA(lua_State *);
 
 void runLuaExample(lua_State * ls)
 {
-	bindToLUA(ls);
-	
+    bindToLUA(ls);
+    
     LOG("------------------------------------------\n");
     if (luaL_dofile(ls, "example.lua"))
     {
@@ -108,34 +108,34 @@ int main()
 {
     testExportMoreThanOnce();
 
-	const luaL_Reg lualibs[] = {
-		{ LUA_COLIBNAME, luaopen_base },
-		{ LUA_LOADLIBNAME, luaopen_package },
-		{ LUA_TABLIBNAME, luaopen_table },
-		{ LUA_IOLIBNAME, luaopen_io },
-		{ LUA_OSLIBNAME, luaopen_os },
-		{ LUA_STRLIBNAME, luaopen_string },
-		{ LUA_MATHLIBNAME, luaopen_math },
-		{ LUA_DBLIBNAME, luaopen_debug },
-		{ NULL, NULL }
-	};
+    const luaL_Reg lualibs[] = {
+        { LUA_COLIBNAME, luaopen_base },
+        { LUA_LOADLIBNAME, luaopen_package },
+        { LUA_TABLIBNAME, luaopen_table },
+        { LUA_IOLIBNAME, luaopen_io },
+        { LUA_OSLIBNAME, luaopen_os },
+        { LUA_STRLIBNAME, luaopen_string },
+        { LUA_MATHLIBNAME, luaopen_math },
+        { LUA_DBLIBNAME, luaopen_debug },
+        { NULL, NULL }
+    };
 
-	auto ls = luaL_newstate();
+    auto ls = luaL_newstate();
 
-	if (ls != NULL)
-	{
-		const luaL_Reg *lib = lualibs;
-		for (; lib->func; lib++) {
-			lua_pushcfunction(ls, lib->func);
-			lua_pushstring(ls, lib->name);
-			lua_call(ls, 1, 0);
-		}
-	
-		runLuaExample(ls);
+    if (ls != NULL)
+    {
+        const luaL_Reg *lib = lualibs;
+        for (; lib->func; lib++) {
+            lua_pushcfunction(ls, lib->func);
+            lua_pushstring(ls, lib->name);
+            lua_call(ls, 1, 0);
+        }
+    
+        runLuaExample(ls);
 
-		lua_close(ls);
-	}
-	return 0;
+        lua_close(ls);
+    }
+    return 0;
 }
 
 
@@ -161,48 +161,48 @@ void operator delete(void * p) noexcept {
 class Cat
 {
 public:
-	Cat()
-		: m_age(1), m_weight(1.0f)
-	{
-		LOG("Cat: a cat spawn at %p.\n", this);
-	}
+    Cat()
+        : m_age(1), m_weight(1.0f)
+    {
+        LOG("Cat: a cat spawn at %p.\n", this);
+    }
 
-	Cat(const char * name)
-		: m_age(1), m_weight(1.0f)
-	{
+    Cat(const char * name)
+        : m_age(1), m_weight(1.0f)
+    {
         strncpy(m_name, name, sizeof(m_name));
-		LOG("Cat: %s spawn at %p\n", m_name, this);
-	}
+        LOG("Cat: %s spawn at %p\n", m_name, this);
+    }
 
-	~Cat()
-	{
-		LOG("Cat: cat[%p] %s is free.\n", this, m_name);
-	}
+    ~Cat()
+    {
+        LOG("Cat: cat[%p] %s is free.\n", this, m_name);
+    }
 
-	const char * getName() const {
-		return m_name; 
-	}
+    const char * getName() const {
+        return m_name; 
+    }
 
 
-	const char * setName(const char * name)
-	{
+    const char * setName(const char * name)
+    {
         strncpy(m_name, name, sizeof(m_name));
-		return m_name;
-	}
+        return m_name;
+    }
 
-	int setAge(const int age)
-	{ 
-		m_age = age; 
-		return m_age;
-	}
+    int setAge(const int age)
+    { 
+        m_age = age; 
+        return m_age;
+    }
 
-	int getAge() const
-	{
-		return m_age; 
-	}
+    int getAge() const
+    {
+        return m_age; 
+    }
 
     void eat(lua_State * L)
-	{
+    {
         if (lua_istable(L, -1))
         {
             lua_pushnil(L);
@@ -219,31 +219,31 @@ public:
             lua_pop(L, 0);
         }
         
-		LOG("%s is getting fatter.\n", m_name);
+        LOG("%s is getting fatter.\n", m_name);
         return;
-	}
+    }
 
     void test(int a, const char * b, float c, const char * d, const char * e)
     {
         LOG("cat test: got params from lua: [0: %d, 1:%s, 2:%f, 3:%s, 4:%s]\n", a, b, c, d, e);
     }
 
-	const char * toString() const
-	{ 
-		static char buf[128];
+    const char * toString() const
+    { 
+        static char buf[128];
         snprintf(buf, sizeof(buf), "%s is a cat, he is %d years old, has a weight of %f kg.", m_name, m_age, m_weight);
-		return buf;
-	}
+        return buf;
+    }
 
-	static void speak(const char * w)
-	{
-		LOG("%s, miaow~~\n", w);
-	}
+    static void speak(const char * w)
+    {
+        LOG("%s, miaow~~\n", w);
+    }
 
 private:
-	char m_name[32];
-	int m_age;
-	float m_weight;
+    char m_name[32];
+    int m_age;
+    float m_weight;
 };
 
 
@@ -329,10 +329,9 @@ void testCallback(int (*f)(const char *, int, float), int val, const char * str)
 {
     char strbuf[128];
     snprintf(strbuf, sizeof(strbuf), "a string from c:%s", str);
-	auto result = f(strbuf, val, 1.2345678f);
-	LOG("c++ testCallback: got result from lua callback: %d\n", result);
+    auto result = f(strbuf, val, 1.2345678f);
+    LOG("c++ testCallback: got result from lua callback: %d\n", result);
 }
-
 
 //===============================================
 // declare custom LuaStack operators
@@ -396,18 +395,18 @@ using namespace luaaa;
 
 void bindToLUA(lua_State * L)
 {
-	// bind class to lua
-	LuaClass<Cat> luaCat(L, "AwesomeCat");
-	luaCat.ctor<const char *>();
-	luaCat.fun("setName", &Cat::setName);
-	luaCat.fun("getName", &Cat::getName);
-	luaCat.fun("setAge", &Cat::setAge);
-	luaCat.fun("getAge", &Cat::getAge);
-	luaCat.fun("eat", &Cat::eat);
+    // bind class to lua
+    LuaClass<Cat> luaCat(L, "AwesomeCat");
+    luaCat.ctor<const char *>();
+    luaCat.fun("setName", &Cat::setName);
+    luaCat.fun("getName", &Cat::getName);
+    luaCat.fun("setAge", &Cat::setAge);
+    luaCat.fun("getAge", &Cat::getAge);
+    luaCat.fun("eat", &Cat::eat);
     luaCat.fun("test", &Cat::test);
-	luaCat.fun("speak", &Cat::speak);
-	luaCat.fun("__tostring", &Cat::toString);
-	luaCat.def("tag", "Animal");
+    luaCat.fun("speak", &Cat::speak);
+    luaCat.fun("__tostring", &Cat::toString);
+    luaCat.def("tag", "Animal");
 
     // bind singleton class to lua
     LuaClass<SingletonWorld> luaWorld(L, "SingletonWorld");
@@ -423,18 +422,18 @@ void bindToLUA(lua_State * L)
     
 
 
-	// define a module with name "AwesomeMod"
-	LuaModule awesomeMod(L, "AwesomeMod");
+    // define a module with name "AwesomeMod"
+    LuaModule awesomeMod(L, "AwesomeMod");
     awesomeMod.def("cint", 20190101);
     awesomeMod.def("cstr", "this is c string");
     
-	const char * dict[] = {
-		"AMICUS", "AMOS", "AMTRAK", "ANGELICA", "ANNIE OAKLEY", 
+    const char * dict[] = {
+        "AMICUS", "AMOS", "AMTRAK", "ANGELICA", "ANNIE OAKLEY", 
         "BEETHOVEN", "BERTHA", "BESSEYA", "BILLIE JEAN", "BIMBO", 
         "BISS", "DECATHLON", "DELIRIUM", "DELIUS", "DEMPSEY" 
     };
 
-	awesomeMod.def("dict", dict, sizeof(dict)/sizeof(dict[0]));
+    awesomeMod.def("dict", dict, sizeof(dict)/sizeof(dict[0]));
 
     int dict2[] = {
         2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47
@@ -445,19 +444,20 @@ void bindToLUA(lua_State * L)
     awesomeMod.fun("testSetSet", testSetSet);
     awesomeMod.fun("testMapMap", testMapMap);
     awesomeMod.fun("testMultipleParams", testMultipleParams);
-	awesomeMod.fun("testCallback", testCallback);
+    awesomeMod.fun("testCallback", testCallback);
     awesomeMod.fun("testPosition", testPosition);
 
+    // put something to global, just emit the module name
+    LuaModule(L).def("pi", 3.1415926535897932);
 
-	// put something to global, just emit the module name
-	LuaModule(L).def("pi", 3.1415926535897932);
+    LuaModule(L).def("WITHOUT_CPP_STDLIB", true);
 
-	// operations can be chained.
-	LuaClass<int*>(L, "int")
-	.ctor<int*>("new")
-	.def("type", "[c int *]")
-	.def("max", INT_MAX)
-	.def("min", INT_MIN);
+    // operations can be chained.
+    LuaClass<int*>(L, "int")
+    .ctor<int*>("new")
+    .def("type", "[c int *]")
+    .def("max", INT_MAX)
+    .def("min", INT_MIN);
     
 }
 

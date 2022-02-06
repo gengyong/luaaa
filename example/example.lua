@@ -42,9 +42,10 @@ function testAwesomeCat()
 	print("cat test: send params to c++: (0:0, 1:1, 2:2, 3:3, 4:4)");
 	a:test(0, 1, 2, 3, 4)
 	a:speak("Thanks!")
-	a:testSet({"99999", "8888", "777", "66", "5"}, {1, 2, 3, 4, 5})
-	print(a:testFunctor1(99999, 88888))
-	print(a:testFunctor2(77777, 66666))
+	if not WITHOUT_CPP_STDLIB then
+		print(a:testFunctor1(99999, 88888))
+		print(a:testFunctor2(77777, 66666))
+	end
 end
 
 function testAwesomeMod()
@@ -90,9 +91,11 @@ function testAwesomeMod()
 	local result = AwesomeMod.testPosition(positionA, positionB)
 	print("positionA["..serialize(positionA).."] + positionB["..serialize(positionB).."] = "..serialize(result))
 
-	print("-------- AwesomeMod.testFunctor --------")
-	print(AwesomeMod.testFunctor1(123, 456.78))
-	print(AwesomeMod.testFunctor2(789, 111.11))
+	if not WITHOUT_CPP_STDLIB then
+		print("-------- AwesomeMod.testFunctor --------")
+		print(AwesomeMod.testFunctor1(123, 456.78))
+		print(AwesomeMod.testFunctor2(789, 111.11))
+	end
 
 end
 
@@ -111,16 +114,18 @@ function testCallback ()
 end
 
 function testCallbackFunctor ()
-	local f = function(a, b, c)
-		print ("lua testCallbackFunctor:")
-		print ("    param a:" .. tostring (a))
-		print ("    param b:" .. tostring (b))
-		print ("    param c:" .. tostring (c))
-		print ("    return b * b(" .. tostring(b * b) ..") as result to c++.\n")
-		return b * b;
+	if not WITHOUT_CPP_STDLIB then
+		local f = function(a, b, c)
+			print ("lua testCallbackFunctor:")
+			print ("    param a:" .. tostring (a))
+			print ("    param b:" .. tostring (b))
+			print ("    param c:" .. tostring (c))
+			print ("    return b * b(" .. tostring(b * b) ..") as result to c++.\n")
+			return b * b;
+		end
+		AwesomeMod.testCallbackFunctor(f, 8888, "lua text from testCallbackFunctor")
 	end
 
-	AwesomeMod.testCallbackFunctor(f, 8888, "lua text from testCallbackFunctor")
 end
 
 function testAutoGC ()
@@ -154,6 +159,7 @@ function testSingletonAndGC()
 	collectgarbage()
 end
 
+print ("\nLUAAA_WITHOUT_CPP_STDLIB defiend:", WITHOUT_CPP_STDLIB);
 
 print ("\n\n-- 1 --. Test auto GC\n")
 testAutoGC();

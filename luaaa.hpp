@@ -41,13 +41,8 @@ inline void luaL_setfuncs(lua_State *L, const luaL_Reg *l, int nup) {
 #	define USE_NEW_MODULE_REGISTRY 0
 #endif
 
-#include <cstring>
 #include <typeinfo>
 #include <utility>
-
-
-
-
 
 #if defined(_MSC_VER)
 #   define RTTI_CLASS_NAME(a) typeid(a).name() //vc always has this operator even if RTTI was disabled.
@@ -60,37 +55,13 @@ inline void luaL_setfuncs(lua_State *L, const luaL_Reg *l, int nup) {
 #endif
 
 #ifndef LUAAA_WITHOUT_CPP_STDLIB
+#   include <cstring>
 #   include <string>
+#   include <functional>
 #else
 #   include <type_traits>
 #   include <cstring>
 #endif
-
-#include <functional>
-namespace detail
-{
-    template <typename F>
-    struct function_traits : public function_traits<decltype(&F::operator())> {};
-
-    template <typename TRET, typename CLASS, typename... ARGS>
-    struct function_traits<TRET(CLASS::*)(ARGS...) const>
-    {
-        using function_type = std::function<TRET(ARGS...)>;
-    };
-}
-
-namespace LUAAA_NS
-{
-    template <typename F>
-    using function_type_t = typename detail::function_traits<F>::function_type;
-
-    template <typename F>
-    function_type_t<F> to_function(F& f)
-    {
-        return static_cast<function_type_t<F>>(f);
-    }
-}
-
 
 inline void LUAAA_DUMP(lua_State * state, const char * name = "") {
     printf(">>>>>>>>>>>>>>>>>>>>>>>>>[%s]\n", name);
@@ -118,10 +89,28 @@ inline void LUAAA_DUMP(lua_State * state, const char * name = "") {
     printf("<<<<<<<<<<<<<<<<<<<<<<<<<\n");
 }
 
-
-
 namespace LUAAA_NS
 {
+#ifndef LUAAA_WITHOUT_CPP_STDLIB
+    template <typename F>
+    struct function_traits : public function_traits<decltype(&F::operator())> {};
+
+    template <typename TRET, typename CLASS, typename... ARGS>
+    struct function_traits<TRET(CLASS::*)(ARGS...) const>
+    {
+        using function_type = std::function<TRET(ARGS...)>;
+    };
+
+    template <typename F>
+    using function_type_t = typename function_traits<F>::function_type;
+
+    template <typename F>
+    function_type_t<F> to_function(F& f)
+    {
+        return static_cast<function_type_t<F>>(f);
+    }
+#endif
+
     //========================================================
     // Lua Class
     //========================================================
@@ -459,6 +448,7 @@ namespace LUAAA_NS
         } \
     };
 
+#ifndef LUAAA_WITHOUT_CPP_STDLIB
     template<typename RET, typename ...ARGS>
     struct LuaStack<std::function<RET(ARGS...)>>
     {
@@ -513,7 +503,7 @@ namespace LUAAA_NS
             static int cacheLuaFuncId = 0;
             struct HelperClass
             {
-                static void CALLCONV f_callback(ARGS... args)
+                static void f_callback(ARGS... args)
                 {
                     lua_rawgeti(cacheLuaState, LUA_REGISTRYINDEX, cacheLuaFuncId);
                     if (lua_isfunction(cacheLuaState, -1))
@@ -542,6 +532,7 @@ namespace LUAAA_NS
             lua_pushcfunction(L, NonMemberFunctionCaller(f));
         }
     };
+#endif
 
     //========================================================
     // index generation helper
@@ -759,7 +750,7 @@ namespace LUAAA_NS
                 luaL_argcheck(state, calleePtr, 1, "cpp closure function not found.");
                 if (calleePtr)
                 {
-                    LuaInvokeInstanceMemberVoid<TCLASS, void, FTYPE, ARGS...>(state, calleePtr);
+                    LuaInvokeInstanceMember<TCLASS, void, FTYPE, ARGS...>(state, calleePtr);
                 }
                 return 0;
             }
@@ -767,6 +758,7 @@ namespace LUAAA_NS
         return HelperClass::Invoke;
     }
 
+#ifndef LUAAA_WITHOUT_CPP_STDLIB
     template<typename TRET, typename ...ARGS>
     lua_CFunction MemberFunctionCaller(const std::function<TRET(ARGS...)>& func)
     {
@@ -808,26 +800,6 @@ namespace LUAAA_NS
         return HelperClass::Invoke;
     }
 
-    //template<typename F>
-    //lua_CFunction MemberFunctionCaller(const F& func)
-    //{
-    //    typedef typename detail::function_traits<F>::function_type FTYPE; (void)(func);
-    //    struct HelperClass
-    //    {
-    //        static int Invoke(lua_State* state)
-    //        {
-    //            void * calleePtr = lua_touserdata(state, lua_upvalueindex(1));
-    //            luaL_argcheck(state, calleePtr, 1, "cpp closure function not found.");
-    //            if (calleePtr)
-    //            {
-    //                LuaInvoke<void, FTYPE, ARGS...>(state, calleePtr, 1);
-    //            }
-    //            return 0;
-    //        }
-    //    };
-    //    return HelperClass::Invoke;
-    //}
-
     template<typename TRET, typename ...ARGS>
     lua_CFunction NonMemberFunctionCaller(const std::function<TRET(ARGS...)>& func)
     {
@@ -868,6 +840,7 @@ namespace LUAAA_NS
         };
         return HelperClass::Invoke;
     }
+#endif
 
     //========================================================
     // constructor invoker
@@ -1288,8 +1261,9 @@ namespace LUAAA_NS
         }
 #endif
 
+    private:
         template<typename F>
-        inline LuaClass<TCLASS>& fun(const char * name, F f)
+        inline LuaClass<TCLASS>& _funImpl(const char * name, F f)
         {
             luaL_getmetatable(m_state, klassName);
             lua_pushstring(m_state, name);
@@ -1308,11 +1282,62 @@ namespace LUAAA_NS
             return (*this);
         }
 
+    public:
+        template<typename FCLASS, typename FRET, typename ...FARGS>
+        inline LuaClass<TCLASS>& fun(const char * name, FRET(FCLASS::*f)(FARGS...))
+        {
+            return _funImpl(name, f);
+        }
+
+        template<typename FCLASS, typename FRET, typename ...FARGS>
+        inline LuaClass<TCLASS>& fun(const char * name, FRET(FCLASS::*f)(FARGS...) const)
+        {
+            return _funImpl(name, f);
+        }
+
+        template<typename FCLASS, typename ...FARGS>
+        inline LuaClass<TCLASS>& fun(const char * name, void(FCLASS::*f)(FARGS...))
+        {
+            return _funImpl(name, f);
+        }
+
+        template<typename FCLASS, typename ...FARGS>
+        inline LuaClass<TCLASS>& fun(const char * name, void(FCLASS::*f)(FARGS...) const)
+        {
+            return _funImpl(name, f);
+        }
+
+        template<typename FRET, typename ...FARGS>
+        inline LuaClass<TCLASS>& fun(const char * name, FRET(*f)(FARGS...))
+        {
+            return _funImpl(name, f);
+        }
+
+        template<typename ...FARGS>
+        inline LuaClass<TCLASS>& fun(const char * name, void(*f)(FARGS...))
+        {
+            return _funImpl(name, f);
+        }
+
+#ifndef LUAAA_WITHOUT_CPP_STDLIB
+        template<typename TRET, typename ...ARGS>
+        inline LuaClass<TCLASS>& fun(const char * name, const std::function<TRET(ARGS...)>& f)
+        {
+            return _funImpl<std::function<TRET(ARGS...)>>(name, f);
+        }
+
+        template<typename ...ARGS>
+        inline LuaClass<TCLASS>& fun(const char * name, const std::function<void(ARGS...)>& f)
+        {
+            return _funImpl<std::function<void(ARGS...)>>(name, f);
+        }
+
         template<typename F>
-        inline LuaClass<TCLASS>& fun2(const char * name, F f)
+        inline LuaClass<TCLASS>& fun(const char * name, F f)
         {
             return fun(name, to_function(f));
         }
+#endif
 
         inline LuaClass<TCLASS>& fun(const char * name, lua_CFunction f)
         {
@@ -1323,14 +1348,6 @@ namespace LUAAA_NS
             lua_pop(m_state, 1);
             return (*this);
         }
-
-#ifndef LUAAA_WITHOUT_CPP_STDLIB
-        template <typename F>
-        inline LuaClass<TCLASS>& fun(const std::string& name, F f)
-        {
-            return fun(name.c_str(), f);
-        }
-#endif
 
         template <typename V>
         inline LuaClass<TCLASS>& def(const char * name, const V& val)
@@ -1355,6 +1372,12 @@ namespace LUAAA_NS
         }
 
 #ifndef LUAAA_WITHOUT_CPP_STDLIB
+        template <typename F>
+        inline LuaClass<TCLASS>& fun(const std::string& name, F f)
+        {
+            return fun(name.c_str(), f);
+        }
+
         template <typename V>
         inline LuaClass<TCLASS>& def(const std::string& name, const V& val)
         {
@@ -1363,7 +1386,7 @@ namespace LUAAA_NS
 #endif
 
     private:
-        lua_State *	m_state;
+        lua_State * m_state;
 
     private:
         static char * klassName;
@@ -1378,7 +1401,6 @@ namespace LUAAA_NS
     struct LuaModule
     {
     public:
-
         LuaModule(lua_State * state, const char * name = "_G")
             : m_state(state)
         {
@@ -1393,9 +1415,9 @@ namespace LUAAA_NS
         {}
 #endif
 
-    public:
+    private:
         template<typename F>
-        inline LuaModule& fun(const char * name, F f)
+        inline LuaModule& _funImpl(const char * name, F f)
         {
             luaL_Reg regtab[] = { { name, NonMemberFunctionCaller(f) },{ nullptr, nullptr } };
 
@@ -1434,7 +1456,38 @@ namespace LUAAA_NS
             return (*this);
         }
 
+    public:
+        template<typename FRET, typename ...FARGS>
+        inline LuaModule& fun(const char * name, FRET(*f)(FARGS...))
+        {
+            return _funImpl(name, f);
+        }
 
+        template<typename ...FARGS>
+        inline LuaModule& fun(const char * name, void(*f)(FARGS...))
+        {
+            return _funImpl(name, f);
+        }
+
+#ifndef LUAAA_WITHOUT_CPP_STDLIB
+        template<typename TRET, typename ...ARGS>
+        inline LuaModule& fun(const char * name, const std::function<TRET(ARGS...)>& f)
+        {
+            return _funImpl<std::function<TRET(ARGS...)>>(name, f);
+        }
+
+        template<typename ...ARGS>
+        inline LuaModule& fun(const char * name, const std::function<void(ARGS...)>& f)
+        {
+            return _funImpl<std::function<void(ARGS...)>>(name, f);
+        }
+
+        template<typename F>
+        inline LuaModule& fun(const char * name, F f)
+        {
+            return fun(name, to_function(f));
+        }
+#endif
 
         inline LuaModule& fun(const char * name, lua_CFunction f)
         {
@@ -1532,6 +1585,12 @@ namespace LUAAA_NS
         }
 
 #ifndef LUAAA_WITHOUT_CPP_STDLIB
+        template<typename F>
+        inline LuaModule& fun(const std::string& name, F f)
+        {
+            return fun(name.c_str(), f);
+        }
+
         template <typename V>
         inline LuaModule& def(const std::string& name, const V& val)
         {

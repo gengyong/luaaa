@@ -11,7 +11,6 @@
 #define LOG printf
 
 
-
 void bindToLUA(lua_State *);
 
 void runLuaExample(lua_State * ls)
@@ -317,27 +316,7 @@ Position testPosition(const Position& a, const Position& b)
 // below shows ho to bind c++ with lua
 //===============================================
 using namespace luaaa;
-//
-//namespace detail
-//{
-//    template <typename F>
-//    struct function_traits : public function_traits<decltype(&F::operator())> {};
-//
-//    template <typename TRET, typename CLASS, typename... ARGS>
-//    struct function_traits<TRET(CLASS::*)(ARGS...) const>
-//    {
-//        using function_type = std::function<TRET(ARGS...)>;
-//    };
-//}
-//
-//template <typename F>
-//using function_type_t = typename detail::function_traits<F>::function_type;
-//
-//template <typename F>
-//function_type_t<F> to_function(F& f)
-//{
-//    return static_cast<function_type_t<F>>(f);
-//}
+
 
 void bindToLUA(lua_State * L)
 {
@@ -352,11 +331,11 @@ void bindToLUA(lua_State * L)
     luaCat.fun("speak", &Cat::speak);
     luaCat.fun("test", &Cat::test);
     luaCat.fun("testSet", testSet);
-    luaCat.fun2("testFunctor1", [](int n1, int n2) -> int {
+    luaCat.fun(std::string("testFunctor1"), [](int n1, int n2) -> int {
         LOG("testFunctor1:%d, %d\n", n1, n2);
         return n1 * n2;
     });
-    luaCat.fun("testFunctor2", to_function([](int n1, int n2) {
+    luaCat.fun("testFunctor2", std::function<void(int, int)>([](int n1, int n2) {
         LOG("testFunctor2:%d, %d\n", n1, n2);
     }));
     luaCat.fun("__tostring", &Cat::toString);
@@ -373,7 +352,6 @@ void bindToLUA(lua_State * L)
     /// for singleton pattern, set deleter(gc) to nullptr to avoid singleton instance be destroyed.
     luaWorld.ctor("getInstance", &SingletonWorld::getInstance, nullptr);
     luaWorld.fun("getTag", &SingletonWorld::getTag);
-    
 
 
     // define a module with name "AwesomeMod"
@@ -397,16 +375,18 @@ void bindToLUA(lua_State * L)
     awesomeMod.fun("testCallback", testCallback);
     awesomeMod.fun("testCallbackFunctor", testCallbackFunctor);
     awesomeMod.fun("testPosition", testPosition);
-    //awesomeMod.fun("testFunctor1", to_function([](int a, float b) {
-    //    LOG("awesomeMod call testFunctor1: %d, %f", a, b);
-    //}));
-    //awesomeMod.fun("testFunctor2", to_function([](int a, float b) -> float {
-    //    LOG("awesomeMod call testFunctor2: %d * %f = %f", a, b, a*b);
-    //    return a * b;
-    //}));
+    awesomeMod.fun("testFunctor1", [](int a, float b) {
+        LOG("awesomeMod call testFunctor1: %d, %f", a, b);
+    });
+    awesomeMod.fun("testFunctor2", [](int a, float b) -> float {
+        LOG("awesomeMod call testFunctor2: %d * %f = %f", a, b, a*b);
+        return a * b;
+    });
 
     // put something to global, just emit the module name
     LuaModule(L).def("pi", 3.1415926535897932);
+
+    LuaModule(L).def("WITHOUT_CPP_STDLIB", false);
 
     // operations can be chained.
     LuaClass<int*>(L, "int")
@@ -415,7 +395,5 @@ void bindToLUA(lua_State * L)
     .def("max", INT_MAX)
     .def("min", INT_MIN);
 
-
-    
 }
 
