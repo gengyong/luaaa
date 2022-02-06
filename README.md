@@ -199,6 +199,13 @@ LuaClass<MyCLass>(state, "MyClass")
 	.fun("sameNameFunc3", (bool(MyClass::*)() &MyClass::sameNameFunc));
 ```
 
+to export lambda function:
+```cpp
+MyMod.fun("lambdaFunc", [](int a, int b) -> int {
+    return a * b;
+});
+```
+
 ## Advanced Topic
 
 
