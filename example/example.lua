@@ -42,6 +42,9 @@ function testAwesomeCat()
 	print("cat test: send params to c++: (0:0, 1:1, 2:2, 3:3, 4:4)");
 	a:test(0, 1, 2, 3, 4)
 	a:speak("Thanks!")
+	a:testSet({"99999", "8888", "777", "66", "5"}, {1, 2, 3, 4, 5})
+	print(a:testFunctor1(99999, 88888))
+	print(a:testFunctor2(77777, 66666))
 end
 
 function testAwesomeMod()
@@ -87,6 +90,10 @@ function testAwesomeMod()
 	local result = AwesomeMod.testPosition(positionA, positionB)
 	print("positionA["..serialize(positionA).."] + positionB["..serialize(positionB).."] = "..serialize(result))
 
+	print("-------- AwesomeMod.testFunctor --------")
+	print(AwesomeMod.testFunctor1(123, 456.78))
+	print(AwesomeMod.testFunctor2(789, 111.11))
+
 end
 
 
@@ -103,6 +110,18 @@ function testCallback ()
 	AwesomeMod.testCallback(f, 5555, "lua text")
 end
 
+function testCallbackFunctor ()
+	local f = function(a, b, c)
+		print ("lua testCallbackFunctor:")
+		print ("    param a:" .. tostring (a))
+		print ("    param b:" .. tostring (b))
+		print ("    param c:" .. tostring (c))
+		print ("    return b * b(" .. tostring(b * b) ..") as result to c++.\n")
+		return b * b;
+	end
+
+	AwesomeMod.testCallbackFunctor(f, 8888, "lua text from testCallbackFunctor")
+end
 
 function testAutoGC ()
 	local cat = AwesomeCat.new ("IWILLLEAVE");
@@ -150,6 +169,9 @@ print ("pi = " .. pi .. "\n")
 
 print ("\n\n-- 5 --. Test Callback\n")
 testCallback();
+
+print ("\n\n-- 5 --. Test CallbackFunctor\n")
+testCallbackFunctor();
 
 print ("\n>>>>" .. collectgarbage ("count"))
 collectgarbage ()
