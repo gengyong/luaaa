@@ -28,6 +28,9 @@ function serialize(obj)
 	return lua  
 end
 
+function luaCallback(param)
+	return param + 1
+end
 
 function testAwesomeCat()
 	local a = AwesomeCat.new ("BINGO")
@@ -45,6 +48,7 @@ function testAwesomeCat()
 	if not WITHOUT_CPP_STDLIB then
 		print(a:testFunctor1(99999, 88888))
 		print(a:testFunctor2(77777, 66666))
+		a:testfunctor(luaCallback)
 	end
 end
 
