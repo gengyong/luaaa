@@ -206,6 +206,61 @@ MyMod.fun("lambdaFunc", [](int a, int b) -> int {
 });
 ```
 
+
+to extend exported lua class, add below codes to your project:
+```lua
+-- put utility functions to name space 'luaaa'
+luaaa = {}
+
+-- create subclass for base, obj can be exist table or nil
+function luaaa:extend(base, obj)
+	derived = obj or {}
+	derived.new = function(self, ...)
+		-- in next version, below line will be changed to 'o = base:new(...)'
+		o = base.new(...)
+		setmetatable(self, getmetatable(o))
+		self["@"] = o
+		return self
+	end
+	return derived
+end
+
+-- get base class of obj
+function luaaa:base(obj)
+	if (type(obj) == "table") then
+		return obj["@"]
+	end
+	return nil
+end
+
+```
+
+extends exported lua class as below:
+```lua
+SpecialCat = luaaa:extend(AwesomeCat, {value = 1})
+-- or:
+--   SpecialCat = luaaa:extend(AwesomeCat)
+-- in this case there no attribute was extended
+
+function SpecialCat:onlyInSpecial()
+    print(self:getName() .. " has a special cat function")
+    print("Special cat " .. self:getName() .." has value:" .. self.value)
+end
+
+function SpecialCat:speak(text)
+    print("Special cat[" .. self:getName() .. "] says: " .. text)
+    -- call override base method:
+	luaaa:base(self):speak(text)
+end
+```
+
+then use SpecialCat:
+```lua
+xxx = SpecialCat:new("xxx")
+xxx:speak("I am a special cat.")
+xxx:onlyInSpecial()
+```
+
 ## Advanced Topic
 
 

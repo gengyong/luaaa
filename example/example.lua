@@ -1,29 +1,52 @@
 
+
+luaaa = {}
+function luaaa:extend(base, obj)
+	derived = obj or {}
+	derived.new = function(self, ...)
+		o = base.new(...)
+		setmetatable(self, getmetatable(o))
+		self["@"] = o
+		return self
+	end
+	return derived
+end
+
+function luaaa:base(obj)
+	if (type(obj) == "table") then
+		return obj["@"]
+	end
+	return nil
+end
+
+
+
+
 function serialize(obj)
-	local lua = ""  
-	local t = type(obj)  
-	if t == "number" then  
-		lua = lua .. obj  
-	elseif t == "boolean" then  
-		lua = lua .. tostring(obj)  
-	elseif t == "string" then  
+	local lua = ""
+	local t = type(obj)
+	if t == "number" then
+		lua = lua .. obj
+	elseif t == "boolean" then
+		lua = lua .. tostring(obj)
+	elseif t == "string" then
 		lua = lua ..  obj
-	elseif t == "table" then  
-		lua = lua .. "{"  
-		for k, v in pairs(obj) do  
-			lua = lua .. "[" .. serialize(k) .. "]=" .. serialize(v) .. ","  
-		end  
-		local metatable = getmetatable(obj)  
-		if metatable ~= nil and type(metatable.__index) == "table" then  
+	elseif t == "table" then
+		lua = lua .. "{"
+		for k, v in pairs(obj) do
+			lua = lua .. "[" .. serialize(k) .. "]=" .. serialize(v) .. ","
+		end
+		local metatable = getmetatable(obj)
+		if metatable ~= nil and type(metatable.__index) == "table" then
 			for k, v in pairs(metatable.__index) do  
-				lua = lua .. "[" .. serialize(k) .. "]=" .. serialize(v) .. ","  
-			end  
-		end  
+				lua = lua .. "[" .. serialize(k) .. "]=" .. serialize(v) .. ","
+			end
+		end
 		lua = lua .. "}"
 	elseif t == "nil" then
 		lua = "nil"
 	else  
-		error("can not serialize a " .. t .. " type.")  
+		error("can not serialize a " .. t .. " type.")
 	end  
 	return lua  
 end
@@ -159,6 +182,27 @@ function testSingletonAndGC()
 	collectgarbage()
 end
 
+
+function testClassInheritance()
+	SpecialCat = luaaa:extend(AwesomeCat, {value = 1})
+
+	function SpecialCat:onlyInSpecial()
+		print(self:getName() .. " has a special cat function")
+		print(self:getName() .. " has value:" .. self.value)
+	end
+
+	function SpecialCat:speak(text)
+		print("Special cat[" .. self:getName() .. "] says: " .. text)
+	end
+
+	sss = SpecialCat:new("sss")
+	sss:onlyInSpecial()
+	sss:speak("I am Special Cat!")
+	print("call base class's method speak():")
+	luaaa:base(sss):speak("I am Special and Awesome Cat!")
+
+end
+
 print ("\nLUAAA_WITHOUT_CPP_STDLIB defiend:", WITHOUT_CPP_STDLIB);
 
 print ("\n\n-- 1 --. Test auto GC\n")
@@ -176,15 +220,17 @@ print ("pi = " .. pi .. "\n")
 print ("\n\n-- 5 --. Test Callback\n")
 testCallback();
 
-print ("\n\n-- 5 --. Test CallbackFunctor\n")
+print ("\n\n-- 6 --. Test CallbackFunctor\n")
 testCallbackFunctor();
+
+print ("\n\n-- 7 --. Test Class Inheritance\n")
+testClassInheritance();
 
 print ("\n>>>>" .. collectgarbage ("count"))
 collectgarbage ()
 print ("\n<<<<" .. collectgarbage ("count"))
 
-print("\n\n-- 6 --. Test Singleton and GC\n")
+print("\n\n-- 8 --. Test Singleton and GC\n")
 testSingletonAndGC()
-print("\n>>>>"..collectgarbage("count"))
-collectgarbage()
-print("\n<<<<"..collectgarbage("count"))
+
+

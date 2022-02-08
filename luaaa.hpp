@@ -23,7 +23,7 @@ extern "C"
 #if !defined LUA_VERSION_NUM || LUA_VERSION_NUM <= 501
 inline void luaL_setfuncs(lua_State *L, const luaL_Reg *l, int nup) {
     luaL_checkstack(L, nup + 1, "too many upvalues");
-    for (; l->name != NULL; l++) {
+    for (; l->name != nullptr; l++) {
         int i;
         lua_pushstring(L, l->name);
         for (i = 0; i < nup; i++)
@@ -63,28 +63,83 @@ inline void luaL_setfuncs(lua_State *L, const luaL_Reg *l, int nup) {
 #   include <cstring>
 #endif
 
-inline void LUAAA_DUMP(lua_State * state, const char * name = "") {
-    printf(">>>>>>>>>>>>>>>>>>>>>>>>>[%s]\n", name);
-    int top = lua_gettop(state);
-    for (int i = 1; i <= top; i++) {
-        printf("%d\t%s\t", i, luaL_typename(state, i));
-        switch (lua_type(state, i)) {
-        case LUA_TNUMBER:
-            printf("%g\n", lua_tonumber(state, i));
-            break;
-        case LUA_TSTRING:
-            printf("%s\n", lua_tostring(state, i));
-            break;
-        case LUA_TBOOLEAN:
-            printf("%s\n", (lua_toboolean(state, i) ? "true" : "false"));
-            break;
-        case LUA_TNIL:
-            printf("%s\n", "nil");
-            break;
-        default:
-            printf("%p\n", lua_topointer(state, i));
-            break;
+inline size_t LUAAA_DUMP_OBJECT(char* buffer, size_t buflen, lua_State * L, int idx, int indent=0) {
+    char prefix[32] = {0};
+    if (indent > sizeof(prefix) - 1) {
+        indent = sizeof(prefix) - 1;
+    }
+    for (int i = 0; i < indent; i++) {
+        prefix[i] = '\t';
+    }
+    switch (lua_type(L, idx)) {
+    default:
+        return snprintf(buffer, buflen, "%s<%s>(%p)", prefix, luaL_typename(L, idx), lua_topointer(L, idx));
+    case LUA_TNUMBER:
+    case LUA_TSTRING:
+        return snprintf(buffer, buflen, "%s\"%s\"", prefix, lua_tostring(L, idx));
+    case LUA_TBOOLEAN:
+        return snprintf(buffer, buflen, "%s%s", prefix, (lua_toboolean(L, idx) ? "true" : "false"));
+    case LUA_TNIL:
+        return snprintf(buffer, buflen, "%s%s", prefix, "nil");
+    case LUA_TTABLE:
+        int ret = 0;
+        if (luaL_getmetafield(L, idx, "__name") == LUA_TSTRING) {
+            ret = snprintf(buffer, buflen, "%s<%s>(%p):", prefix, lua_tostring(L, -1), lua_topointer(L, idx));
+        } else {
+            ret = snprintf(buffer, buflen, "%s<%s>(%p):", prefix, luaL_typename(L, idx), lua_topointer(L, idx));
         }
+        if (ret > 0) {
+            size_t wrote = ret;
+            lua_pushnil(L);
+            while (lua_next(L, idx)) {
+                const int top = lua_gettop(L);
+                if (buflen > wrote) {
+                    ret = snprintf(buffer + wrote, buflen - wrote, "\n");
+                    if (ret > 0) {
+                        wrote += ret;
+                    }
+                }
+
+                if (buflen > wrote) {
+                    ret = LUAAA_DUMP_OBJECT(buffer + wrote, buflen - wrote, L, top - 1, indent+1);
+                    if (ret > 0) {
+                        wrote += ret;
+                    }
+                }
+
+                if (buflen > wrote) {
+                    ret = snprintf(buffer + wrote, buflen - wrote, "\t");
+                    if (ret > 0) {
+                        wrote += ret;
+                    }
+                }
+
+                if (buflen > wrote) {
+                    if (lua_topointer(L, top) == lua_topointer(L, idx)) {
+                        ret = snprintf(buffer + wrote, buflen - wrote, "%s<self>(%p)", prefix, lua_topointer(L, top));
+                    } else {
+                        ret = LUAAA_DUMP_OBJECT(buffer + wrote, buflen - wrote, L, top, 0);
+                    }
+                    if (ret > 0) {
+                        wrote += ret;
+                    }
+                }
+                lua_pop(L, 1);
+            }
+            lua_pop(L, 0);
+            return wrote;
+        }
+    }
+    return 0;
+}
+
+inline void LUAAA_DUMP(lua_State * L, const char * name = "") {
+    printf(">>>>>>>>>>>>>>>>>>>>>>>>>[%s]\n", name);
+    char buffer[4096] = {0};
+    int top = lua_gettop(L);
+    for (int i = 1; i <= top; i++) {
+        LUAAA_DUMP_OBJECT(buffer, sizeof(buffer) - 1, L, i);
+        printf("%d\t%s\n", i, buffer);
     }
     printf("<<<<<<<<<<<<<<<<<<<<<<<<<\n");
 }
@@ -130,9 +185,36 @@ namespace LUAAA_NS
 #else
             luaL_argcheck(state, LuaClass<T>::klassName != nullptr, 1, "cpp class not export");
 #endif
+            if (lua_istable(state, idx)) {
+#if !defined LUA_VERSION_NUM || LUA_VERSION_NUM <= 502
+                if (lua_getmetatable(state, idx)) {
+                    lua_getfield(state, LUA_REGISTRYINDEX, LuaClass<T>::klassName);
+                    if (lua_rawequal(state, -1, -2)) {
+                        lua_getfield(state, idx, "@");
+                        if (lua_type(state, -1) == LUA_TUSERDATA) {
+                            T ** t = (T**)luaL_checkudata(state, -1, LuaClass<T>::klassName);
+                            luaL_argcheck(state, t != nullptr, 1, "invalid user data");
+                            luaL_argcheck(state, *t != nullptr, 1, "invalid user data");
+                            return (**t);
+                        }
+                    }
+                }
+#else
+                if (luaL_getmetafield(state, idx, "__name") == LUA_TSTRING) {
+                    if (strcmp(lua_tostring(state, -1), LuaClass<T>::klassName) == 0) {
+                        if (lua_getfield(state, idx, "@") == LUA_TUSERDATA) {
+                            T ** t = (T**)luaL_checkudata(state, -1, LuaClass<T>::klassName);
+                            luaL_argcheck(state, t != nullptr, 1, "invalid user data");
+                            luaL_argcheck(state, *t != nullptr, 1, "invalid user data");
+                            return (**t);
+                        }
+                    }
+                }
+#endif
+            }
             T ** t = (T**)luaL_checkudata(state, idx, LuaClass<T>::klassName);
-            luaL_argcheck(state, t != NULL, 1, "invalid user data");
-            luaL_argcheck(state, *t != NULL, 1, "invalid user data");
+            luaL_argcheck(state, t != nullptr, 1, "invalid user data");
+            luaL_argcheck(state, *t != nullptr, 1, "invalid user data");
             return (**t);
         }
 
@@ -184,15 +266,15 @@ namespace LUAAA_NS
                 if (LuaClass<T*>::klassName != nullptr)
                 {
                     T ** t = (T**)luaL_checkudata(state, idx, LuaClass<T*>::klassName);
-                    luaL_argcheck(state, t != NULL, 1, "invalid user data");
-                    luaL_argcheck(state, *t != NULL, 1, "invalid user data");
+                    luaL_argcheck(state, t != nullptr, 1, "invalid user data");
+                    luaL_argcheck(state, *t != nullptr, 1, "invalid user data");
                     return *t;
                 }
                 if (LuaClass<T>::klassName != nullptr)
                 {
                     T ** t = (T**)luaL_checkudata(state, idx, LuaClass<T>::klassName);
-                    luaL_argcheck(state, t != NULL, 1, "invalid user data");
-                    luaL_argcheck(state, *t != NULL, 1, "invalid user data");
+                    luaL_argcheck(state, t != nullptr, 1, "invalid user data");
+                    luaL_argcheck(state, *t != nullptr, 1, "invalid user data");
                     return *t;
                 }
             }
@@ -848,16 +930,16 @@ namespace LUAAA_NS
     template<typename TCLASS, typename ...ARGS>
     struct PlacementConstructorCaller
     {
-        static TCLASS * Invoke(lua_State * state, void * mem)
+        static TCLASS * Invoke(lua_State * state, void * mem, size_t skip)
         {
-            return InvokeImpl(state, mem, typename make_indices<sizeof...(ARGS)>::type());
+            return InvokeImpl(state, mem, typename make_indices<sizeof...(ARGS)>::type(), skip);
         }
 
     private:
         template<std::size_t ...Ns>
-        static TCLASS * InvokeImpl(lua_State * state, void * mem, indices<Ns...>)
+        static TCLASS * InvokeImpl(lua_State * state, void * mem, indices<Ns...>, size_t skip)
         {
-            return new(mem) TCLASS(LuaStack<ARGS>::get(state, Ns + 1)...);
+            return new(mem) TCLASS(LuaStack<ARGS>::get(state, Ns + 1 + skip)...);
         }
     };
 
@@ -947,10 +1029,12 @@ namespace LUAAA_NS
         {
             struct HelperClass {
                 static int f_gc(lua_State* state) {
-                    TCLASS ** objPtr = (TCLASS**)luaL_checkudata(state, -1, LuaClass<TCLASS>::klassName);
-                    if (objPtr && *objPtr)
-                    {
-                        (*objPtr)->~TCLASS();
+                    if (lua_isuserdata(state, -1)) {
+                        TCLASS ** objPtr = (TCLASS**)luaL_checkudata(state, -1, LuaClass<TCLASS>::klassName);
+                        if (objPtr && *objPtr)
+                        {
+                            (*objPtr)->~TCLASS();
+                        }
                     }
                     return 0;
                 }
@@ -959,8 +1043,7 @@ namespace LUAAA_NS
                     TCLASS ** objPtr = (TCLASS **)lua_newuserdata(state, sizeof(TCLASS*) + sizeof(TCLASS));
                     if (objPtr)
                     {
-                        TCLASS * obj = PlacementConstructorCaller<TCLASS, ARGS...>::Invoke(state, (void*)(objPtr + 1));
-
+                        TCLASS * obj = PlacementConstructorCaller<TCLASS, ARGS...>::Invoke(state, (void*)(objPtr + 1), 0);
                         *objPtr = obj;
                         luaL_Reg destructor[] = { { "__gc", HelperClass::f_gc },{ nullptr, nullptr } };
                         luaL_getmetatable(state, LuaClass<TCLASS>::klassName);
@@ -995,10 +1078,12 @@ namespace LUAAA_NS
             typedef decltype(spawner) SPAWNERFTYPE;
             struct HelperClass {
                 static int f_gc(lua_State* state) {
-                    TCLASS ** objPtr = (TCLASS**)luaL_checkudata(state, -1, LuaClass<TCLASS>::klassName);
-                    if (objPtr)
-                    {
-                        DestructorCaller<TCLASS>::Invoke(*objPtr);
+                    if (lua_isuserdata(state, -1)) {
+                        TCLASS ** objPtr = (TCLASS**)luaL_checkudata(state, -1, LuaClass<TCLASS>::klassName);
+                        if (objPtr)
+                        {
+                            DestructorCaller<TCLASS>::Invoke(*objPtr);
+                        }
                     }
                     return 0;
                 }
@@ -1014,12 +1099,10 @@ namespace LUAAA_NS
                             if (objPtr)
                             {
                                 *objPtr = obj;
-
                                 luaL_Reg destructor[] = { { "__gc", HelperClass::f_gc }, { nullptr, nullptr } };
                                 luaL_getmetatable(state, LuaClass<TCLASS>::klassName);
                                 luaL_setfuncs(state, destructor, 0);
                                 lua_setmetatable(state, -2);
-                                
                                 return 1;
                             }
                             else
@@ -1073,13 +1156,14 @@ namespace LUAAA_NS
                     void * deleter = lua_touserdata(state, lua_upvalueindex(1));
                     luaL_argcheck(state, deleter, 1, "cpp closure deleter not found.");
                     if (deleter) {
-                        TCLASS ** objPtr = (TCLASS**)luaL_checkudata(state, -1, LuaClass<TCLASS>::klassName);
-                        if (objPtr)
-                        {
-                            (*(DELETERFTYPE*)(deleter))(*objPtr);
+                        if (lua_isuserdata(state, -1)) {
+                            TCLASS ** objPtr = (TCLASS**)luaL_checkudata(state, -1, LuaClass<TCLASS>::klassName);
+                            if (objPtr)
+                            {
+                                (*(DELETERFTYPE*)(deleter))(*objPtr);
+                            }
                         }
                     }
-                    
                     return 0;
                 }
 
@@ -1101,7 +1185,6 @@ namespace LUAAA_NS
 
                                 luaL_Reg destructor[] = { { "__gc", HelperClass::f_gc }, { nullptr, nullptr } };
 
-                               
                                 luaL_getmetatable(state, LuaClass<TCLASS>::klassName);
 
                                 DELETERFTYPE * deleterPtr = (DELETERFTYPE*)lua_newuserdata(state, sizeof(DELETERFTYPE));
@@ -1577,7 +1660,7 @@ namespace LUAAA_NS
             lua_setglobal(m_state, m_moduleName);
 #else
             luaL_Reg regtab = { nullptr, nullptr };
-            luaL_openlib(m_state, m_moduleName.c_str(), &regtab, 0);
+            luaL_openlib(m_state, m_moduleName, &regtab, 0);
             LuaStack<decltype(str)>::put(m_state, str);
             lua_setfield(m_state, -2, name);
 #endif
