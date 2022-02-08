@@ -153,6 +153,12 @@ public:
         LOG("%s, miaow~~\n", w.c_str());
     }
 
+    void testfunctor(std::function<int(int param)> callback)
+    {
+	int result = callback(42);
+	LOG("Callback with argument 42 leads to %d.\n", result);
+    }
+
 private:
     std::string m_name;
     int m_age;
@@ -331,6 +337,7 @@ void bindToLUA(lua_State * L)
     luaCat.fun("speak", &Cat::speak);
     luaCat.fun("test", &Cat::test);
     luaCat.fun("testSet", testSet);
+    luaCat.fun("testfunctor", &Cat::testfunctor);
     luaCat.fun(std::string("testFunctor1"), [](int n1, int n2) -> int {
         LOG("testFunctor1:%d, %d\n", n1, n2);
         return n1 * n2;
