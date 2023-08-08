@@ -41,6 +41,7 @@ inline void luaL_setfuncs(lua_State *L, const luaL_Reg *l, int nup) {
 #	define USE_NEW_MODULE_REGISTRY 0
 #endif
 
+#include <cassert>
 #include <typeinfo>
 #include <utility>
 
