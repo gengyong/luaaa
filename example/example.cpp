@@ -47,29 +47,11 @@ void runLuaExample(lua_State * ls)
 
 int main()
 {
-    const luaL_Reg lualibs[] = {
-        { LUA_COLIBNAME, luaopen_base },
-        { LUA_LOADLIBNAME, luaopen_package },
-        { LUA_TABLIBNAME, luaopen_table },
-        { LUA_IOLIBNAME, luaopen_io },
-        { LUA_OSLIBNAME, luaopen_os },
-        { LUA_STRLIBNAME, luaopen_string },
-        { LUA_MATHLIBNAME, luaopen_math },
-        { LUA_DBLIBNAME, luaopen_debug },
-        { NULL, NULL }
-    };
-
     auto ls = luaL_newstate();
+    luaL_openlibs(ls);
 
     if (ls != NULL)
     {
-        const luaL_Reg *lib = lualibs;
-        for (; lib->func; lib++) {
-            lua_pushcfunction(ls, lib->func);
-            lua_pushstring(ls, lib->name);
-            lua_call(ls, 1, 0);
-        }
-    
         runLuaExample(ls);
 
         lua_close(ls);
@@ -155,8 +137,8 @@ public:
 
     void testfunctor(std::function<int(int param)> callback)
     {
-	int result = callback(42);
-	LOG("Callback with argument 42 leads to %d.\n", result);
+	    int result = callback(42);
+	    LOG("Callback with argument 42 leads to %d.\n", result);
     }
 
 private:
@@ -191,7 +173,7 @@ public:
         LOG("SingletonWorld[%s] constructed.\n", mTag.c_str());
     }
 
-    SingletonWorld(const std::string tagName) : mTag(tagName) {
+    SingletonWorld(const std::string& tagName) : mTag(tagName) {
         LOG("SingletonWorld[%s] constructed.\n", mTag.c_str());
     }
 
@@ -350,8 +332,10 @@ void bindToLUA(lua_State * L)
 
     // bind singleton class to lua
     LuaClass<SingletonWorld> luaWorld(L, "SingletonWorld");
-    /// use class constructor as instance spawner, default destructor will be called from gc.
+    /// use class default constructor as instance spawner, default destructor will be called from gc.
     luaWorld.ctor();
+    /// use class constructor as instance spawner, default destructor will be called from gc.
+    //luaWorld.ctor<const std::string&>("createWithName");
     /// use static function as instance spawner, default destructor will be called from gc.
     luaWorld.ctor("newInstance", &SingletonWorld::newInstance);
     /// use static function as instance spawner and static function as delete function which be called from gc.
@@ -386,14 +370,14 @@ void bindToLUA(lua_State * L)
         LOG("awesomeMod call testFunctor1: %d, %f", a, b);
     });
     awesomeMod.fun("testFunctor2", [](int a, float b) -> float {
-        LOG("awesomeMod call testFunctor2: %d * %f = %f", a, b, a*b);
+        LOG("awesomeMod call testFunctor2(%d * %f = %f):", a, b, a*b);
         return a * b;
     });
 
     // put something to global, just emit the module name
     LuaModule(L).def("pi", 3.1415926535897932);
 
-    LuaModule(L).def("WITHOUT_CPP_STDLIB", false);
+    LuaModule(L).def("WITHOUT_CPP_STDLIB", !!LUAAA_WITHOUT_CPP_STDLIB);
 
     // operations can be chained.
     LuaClass<int*>(L, "int")

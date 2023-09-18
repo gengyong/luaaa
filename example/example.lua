@@ -156,7 +156,7 @@ function testCallbackFunctor ()
 end
 
 function testAutoGC ()
-	local cat = AwesomeCat.new ("IWILLLEAVE");
+	local cat = AwesomeCat.new("IWILLLEAVE");
 	cat:speak("I will leave ...")
 	cat = nil;
 	collectgarbage ()
@@ -207,7 +207,7 @@ function testClassInheritance()
 
 end
 
-print ("\nLUAAA_WITHOUT_CPP_STDLIB defiend:", WITHOUT_CPP_STDLIB);
+print ("\nLUAAA_WITHOUT_CPP_STDLIB:", WITHOUT_CPP_STDLIB);
 
 print ("\n\n-- 1 --. Test auto GC\n")
 testAutoGC();
