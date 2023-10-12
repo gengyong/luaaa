@@ -310,7 +310,7 @@ void bindToLUA(lua_State * L)
 {
     // bind class to lua
     LuaClass<Cat> luaCat(L, "AwesomeCat");
-    luaCat.ctor<std::string>();
+    luaCat.ctor<std::string>("new");
     luaCat.fun("setName", &Cat::setName);
     luaCat.fun("getName", &Cat::getName);
     luaCat.fun("setAge", &Cat::setAge);
@@ -335,7 +335,7 @@ void bindToLUA(lua_State * L)
     /// use class default constructor as instance spawner, default destructor will be called from gc.
     luaWorld.ctor();
     /// use class constructor as instance spawner, default destructor will be called from gc.
-    //luaWorld.ctor<const std::string&>("createWithName");
+    luaWorld.ctor<const std::string&>("createWithName");
     /// use static function as instance spawner, default destructor will be called from gc.
     luaWorld.ctor("newInstance", &SingletonWorld::newInstance);
     /// use static function as instance spawner and static function as delete function which be called from gc.
@@ -349,6 +349,7 @@ void bindToLUA(lua_State * L)
     LuaModule awesomeMod(L, "AwesomeMod");
     awesomeMod.def("cint", 20190101);
     awesomeMod.def("cstr", "this is c string");
+    awesomeMod.def("acat", luaCat);
 
     std::list<std::string> dict {
         "AMICUS", "AMOS", "AMTRAK", "ANGELICA", "ANNIE OAKLEY", 
