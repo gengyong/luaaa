@@ -9,7 +9,8 @@
 #define HEADER_LUAAA_HPP
 
 #define LUAAA_NS luaaa
-#define LUAAA_VER (101)
+#define LUAAA_VER_MAJOR (1)
+#define LUAAA_VER_MINOR (2)
 
 /// if you want to disable C++ std libs, set to 1
 #ifndef LUAAA_WITHOUT_CPP_STDLIB
