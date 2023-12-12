@@ -247,8 +247,7 @@ namespace LUAAA_NS
 #endif
             }
             T ** t = (T**)luaL_checkudata(state, idx, LuaClass<T>::klassName);
-            luaL_argcheck(state, t != nullptr, 1, "invalid user data");
-            luaL_argcheck(state, *t != nullptr, 1, "invalid user data");
+            luaL_argcheck(state, t != nullptr && *t != nullptr, 1, "invalid user data");
             return (**t);
         }
 
