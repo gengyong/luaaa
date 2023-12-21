@@ -236,7 +236,7 @@ namespace LUAAA_NS
                 }
 #else
                 if (luaL_getmetafield(state, idx, "__name") == LUA_TSTRING) {
-                    if (strcmp(lua_tostring(state, -1), LuaClass<T>::klassName) == 0) {
+                    if (LuaClass<T>::klassName && strcmp(lua_tostring(state, -1), LuaClass<T>::klassName) == 0) {
                         if (lua_getfield(state, idx, "@") == LUA_TUSERDATA) {
                             T ** t = (T**)luaL_checkudata(state, -1, LuaClass<T>::klassName);
                             luaL_argcheck(state, t != nullptr, 1, "invalid user data");
@@ -300,15 +300,13 @@ namespace LUAAA_NS
                 if (LuaClass<T*>::klassName != nullptr)
                 {
                     T ** t = (T**)luaL_checkudata(state, idx, LuaClass<T*>::klassName);
-                    luaL_argcheck(state, t != nullptr, 1, "invalid user data");
-                    luaL_argcheck(state, *t != nullptr, 1, "invalid user data");
+                    luaL_argcheck(state, t != nullptr && *t != nullptr, 1, "invalid user data");
                     return *t;
                 }
                 if (LuaClass<T>::klassName != nullptr)
                 {
                     T ** t = (T**)luaL_checkudata(state, idx, LuaClass<T>::klassName);
-                    luaL_argcheck(state, t != nullptr, 1, "invalid user data");
-                    luaL_argcheck(state, *t != nullptr, 1, "invalid user data");
+                    luaL_argcheck(state, t != nullptr && *t != nullptr, 1, "invalid user data");
                     return *t;
                 }
             }
@@ -1092,7 +1090,7 @@ namespace LUAAA_NS
                 }
 
                 static int f_new(lua_State* state) {
-                    auto uData = (LuaClass<TCLASS, TAG>::UserDataDetail*)lua_newuserdata(state, sizeof(LuaClass<TCLASS, TAG>::UserDataDetail) + sizeof(TCLASS));
+                    auto uData = (typename LuaClass<TCLASS, TAG>::UserDataDetail*)lua_newuserdata(state, sizeof(LuaClass<TCLASS, TAG>::UserDataDetail) + sizeof(TCLASS));
                     if (uData)
                     {
                         TCLASS * obj = PlacementConstructorCaller<TCLASS, ARGS...>::Invoke(state, (void*)(uData + 1), 0);
@@ -1145,7 +1143,7 @@ namespace LUAAA_NS
                     void * spawner = lua_touserdata(state, lua_upvalueindex(1));
                     luaL_argcheck(state, spawner, 1, "cpp closure spawner not found.");
                     if (spawner) {
-                        auto uData = (LuaClass<TCLASS, TAG>::UserDataDetail*)lua_newuserdata(state, sizeof(LuaClass<TCLASS, TAG>::UserDataDetail));
+                        auto uData = (typename LuaClass<TCLASS, TAG>::UserDataDetail*)lua_newuserdata(state, sizeof(LuaClass<TCLASS, TAG>::UserDataDetail));
                         if (uData)
                         {
                             auto obj = LuaInvoke<TCLASS*, SPAWNERFTYPE, ARGS...>(state, spawner, 0);
@@ -1223,7 +1221,7 @@ namespace LUAAA_NS
                     luaL_argcheck(state, deleter, 2, "cpp closure deleter not found.");
 
                     if (spawner) {
-                        auto uData = (LuaClass<TCLASS, TAG>::UserDataDetail*)lua_newuserdata(state, sizeof(LuaClass<TCLASS, TAG>::UserDataDetail));
+                        auto uData = (typename LuaClass<TCLASS, TAG>::UserDataDetail*)lua_newuserdata(state, sizeof(LuaClass<TCLASS, TAG>::UserDataDetail));
                         if (uData)
                         {
                             auto obj = LuaInvoke<TCLASS*, SPAWNERFTYPE, ARGS...>(state, spawner, 0);
@@ -1303,7 +1301,7 @@ namespace LUAAA_NS
                     void * spawner = lua_touserdata(state, lua_upvalueindex(1));
                     luaL_argcheck(state, spawner, 1, "cpp closure spawner not found.");
                     if (spawner) {
-                        auto uData = (LuaClass<TCLASS, TAG>::UserDataDetail*)lua_newuserdata(state, sizeof(LuaClass<TCLASS, TAG>::UserDataDetail));
+                        auto uData = (typename LuaClass<TCLASS, TAG>::UserDataDetail*)lua_newuserdata(state, sizeof(LuaClass<TCLASS, TAG>::UserDataDetail));
                         if (uData)
                         {
                             auto obj = LuaInvoke<TCLASS*, SPAWNERFTYPE, ARGS...>(state, spawner, 0);
@@ -1678,7 +1676,7 @@ namespace LUAAA_NS
         template <typename TCLASS, int TAG>
         inline LuaModule& def(const char* name, const luaaa::LuaClass<TCLASS, TAG>&, const TCLASS* obj = nullptr, void(*deleter)(TCLASS*) = nullptr)
         {
-            typename LuaClass<TCLASS, TAG>::UserDataDetail userData;
+            typename LuaClass<TCLASS, TAG>::UserDataDetail userData{};
             if (obj)
             {
                 userData.obj = const_cast<TCLASS*>(obj);
@@ -1859,6 +1857,7 @@ namespace LUAAA_NS
 #include <map>
 #include <unordered_set>
 #include <unordered_map>
+#include <tuple>
 
 namespace LUAAA_NS
 {
@@ -2325,6 +2324,121 @@ namespace LUAAA_NS
             lua_rawseti(L, -2, 2);
         }
     };
+ 
+    // std::tuple 
+#if __cplusplus >= 201402 || _MSVC_LANG >= 201402
+    template <typename> struct is_tuple : std::false_type {};
+    template <typename ...T> struct is_tuple<std::tuple<T...>> : std::true_type {};
+
+    template<typename Tuple, std::size_t ...Index, typename = typename std::enable_if<is_tuple<Tuple>::value>::type>
+    inline void load_tuple_from_lua_table(lua_State* L, int idx, Tuple& tuple, std::index_sequence<Index...>)
+    {
+        luaL_argcheck(L, lua_istable(L, idx), 1, "required table not found on stack.");
+        if (lua_istable(L, idx))
+        {
+            lua_pushnil(L);
+            std::initializer_list<int>{(
+                lua_next(L, idx) && (std::get<Index>(tuple) = LuaStack<decltype(std::get<Index>(tuple))>::get(L, lua_gettop(L)), 1) && (lua_pop(L, 1), 1),
+                0)...};
+            lua_pop(L, 0);
+        }
+    }
+
+    template<typename Tuple, std::size_t ...Index, typename = typename std::enable_if<is_tuple<Tuple>::value>::type>
+    inline void save_tuple_to_lua_table(lua_State* L, const Tuple& tuple, std::index_sequence<Index...>)
+    {
+        lua_newtable(L);
+        std::initializer_list<int>{(
+            LuaStack<decltype(std::get<Index>(tuple))>::put(L, std::get<Index>(tuple)),
+            lua_rawseti(L, -2, Index + 1),
+            0)...};
+    }
+
+    template<typename ...TS> 
+    struct LuaStack<std::tuple<TS...>>
+    {
+        typedef std::tuple<TS...> Container;
+        inline static Container get(lua_State* L, int idx)
+        {
+            Container result;
+            load_tuple_from_lua_table(L, idx, result, std::make_index_sequence<std::tuple_size<Container>::value>{});
+            return result;
+        }
+
+        inline static void put(lua_State* L, const Container& s)
+        {
+            save_tuple_to_lua_table(L, s, std::make_index_sequence<std::tuple_size<Container>::value>{});
+        }
+    };
+#elif __cplusplus
+    template <typename T, size_t N>
+    struct TupleAccessor
+    {
+        static void get(lua_State* L, int idx, T& tuple)
+        {
+            TupleAccessor<T, N - 1>::get(L, idx, tuple);
+            if (lua_next(L, idx))
+            {
+                const int top = lua_gettop(L);
+                std::get<N - 1>(tuple) = LuaStack<typename std::tuple_element<N - 1, T>::type>::get(L, top);
+                lua_pop(L, 1);
+            }
+        }
+
+        static void put(lua_State* L, const T& tuple) {
+            TupleAccessor<T, N - 1>::put(L, tuple);
+            LuaStack<typename std::tuple_element<N - 1, T>::type>::put(L, std::get<N - 1>(tuple));
+            lua_rawseti(L, -2, N);
+        }
+    };
+
+    template <typename T>
+    struct TupleAccessor<T, 1>
+    {
+        static void get(lua_State* L, int idx, T& tuple)
+        {
+            if (lua_next(L, idx))
+            {
+                const int top = lua_gettop(L);
+                std::get<0>(tuple) = LuaStack<decltype(std::get<0>(tuple))>::get(L, top);
+                lua_pop(L, 1);
+            }
+        }
+
+        static void put(lua_State* L, const T& tuple) {
+            LuaStack<typename std::tuple_element<0, T>::type>::put(L, std::get<0>(tuple));
+            lua_rawseti(L, -2, 1);
+        }
+    };
+
+    template <typename T>
+    struct TupleAccessor<T, 0>
+    {
+        static void get(lua_State*, int, T&) {}
+        static void put(lua_State*, const T&) {}
+    };
+
+    template<typename ...TS> 
+    struct LuaStack<std::tuple<TS...>>
+    {
+        typedef std::tuple<TS...> Container;
+        inline static Container get(lua_State* L, int idx)
+        {
+            Container result;
+            lua_pushnil(L);
+            TupleAccessor<Container, std::tuple_size<Container>::value>::get(L, idx, result);
+            lua_pop(L, 0);
+            return result;
+        }
+
+        inline static void put(lua_State* L, const Container& s)
+        {
+            lua_newtable(L);
+            TupleAccessor<Container, std::tuple_size<Container>::value>::put(L, s);
+        }
+    };
+#endif
+
 }
 
 #endif //#if !LUAAA_WITHOUT_CPP_STDLIB

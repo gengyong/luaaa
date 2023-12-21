@@ -109,6 +109,20 @@ function testAwesomeMod()
 		}
 	});
 
+	print("-------- AwesomeMod.testTuple() --------")
+	local values = AwesomeMod.testTuple({"a duck", 999, 1.234})
+	print("Lua got multiple values from c++:")
+	for i = 1, #values do 
+        print("[" .. i .. "]" .. values[i]) 
+    end 
+
+	-- AwesomeMod.testTuple2() accept only empty tuple
+	local values2 = AwesomeMod.testTuple2({"a duck", 999, 1.234})
+	print("Lua got empty tuple from c++.")
+	for k,v in pairs(values2) do
+		print("[" .. tostring(k) .. "]" .. tostring(v))
+	end
+
 	print("-------- AwesomeMod.testMultipleParams() --------")
 	AwesomeMod.testMultipleParams(0,1,"two",3.3,44.44)
 

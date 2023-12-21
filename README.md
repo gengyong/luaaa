@@ -90,38 +90,37 @@ luaWorld.ctor("getInstance", &SingletonWorld::getInstance, nullptr);
 instance spawner and delete function can be static member function or global function,
 and delete function must accept one instance pointer which to be collect back or delete. 
 
-----------------------------
-### ***Breaking Changes***
 
-Always define **at least one** 'ctor' for a LuaClass.
-
-> in previous version, a default 'ctor' was generated in LuaClass constructor.  
-the default 'ctor' will call default C++ class constructor, and register C++ class destructor as gc function.  
-In some case, this default 'ctor' is not fit requirements it's invalid.  
-for example, singleton class declare constructor/destructor as protected/private methods. in this case, default 'ctor' cannot access it, so default 'ctor' doesn't work, a custom 'ctor' is required here.  
-in current version, the default 'ctor' was removed from LuaClass constructor. User must provide a 'ctor' in binding codes otherwise the LuaClass cannot be instantiate in lua.  
-In most case, just define a default 'ctor' as below:
+A 'ctor'(constructor) is always required for LuaClass, you can define more than one 'ctor'.
+In most case, a 'ctor' likes below is enought:
 ```cpp
 LuaClass<XXX> luaCls(luaState, 'XXXname');
 luaCls.ctor(); 
 ```
+
 > above codes will define a lua object constructor named as 'new', in lua `XXXname.new()` equivalent to C++:
+
 ```cpp
 new XXX();
 ```
+
 > or change constructor name to 'create':
+
 ```cpp
 luaCls.ctor("create");
 ```
+
 > if C++ constructor is not the default constructor, add sigature to match C++ class constructor:
+
 ```cpp
 luaCls.ctor<std::string>('create');
 ```
-> which defined a lua object constructor named as 'create', in lua `XXXname.create("string param")` equivalent to C++:
+
+> which defines a lua object constructor named as 'create', in lua `XXXname.create("string param")` equivalent to C++:
+
 ```cpp
 new XXX("string param");
 ```
-----------------------------
 
 
 static member function, global fuctions or constant can be export in module.
@@ -216,7 +215,6 @@ luaaa = {}
 function luaaa:extend(base, obj)
 	derived = obj or {}
 	derived.new = function(self, ...)
-		-- in next version, below line will be changed to 'o = base:new(...)'
 		o = base.new(...)
 		setmetatable(self, getmetatable(o))
 		self["@"] = o

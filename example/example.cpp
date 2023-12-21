@@ -110,7 +110,7 @@ public:
 
     void eat(const std::list<std::string>& foods)
     {
-        for (auto it : foods)
+        for (auto & it : foods)
         {
             LOG("%s eat %s.\n", m_name.c_str(), it.c_str());
             m_weight += 0.1f;
@@ -140,6 +140,9 @@ public:
 	    int result = callback(42);
 	    LOG("Callback with argument 42 leads to %d.\n", result);
     }
+
+public:
+    std::string memberVar;
 
 private:
     std::string m_name;
@@ -250,11 +253,26 @@ void testMapMap(const std::map<std::string, std::map<std::string, std::string>>&
 }
 
 
+const std::tuple<int, std::string, std::string, float> testTuple(std::tuple<std::string, int, float> info) {
+    LOG("c++ load lua list to tuple:\n");
+    LOG("\t0: '%s'\n", std::get<0>(info).c_str());
+    LOG("\t1: %d\n", std::get<1>(info));
+    LOG("\t2: %g\n", std::get<2>(info));
+    LOG("c++ returns tuple to lua:\n");
+    return std::tuple<int, std::string, std::string, float>(123, "string A", "string B", 0.123f);
+}
+
+const std::tuple<> testTuple2(std::tuple<> info) {
+    LOG("c++ load lua list to empty tuple.\n");
+    LOG("c++ returns empty tuple to lua:\n");
+    return std::tuple<>();
+}
 
 void testMultipleParams(int a, int b, const std::string& c, float d, double e)
 {
-    LOG("c++ testCallback: got params from lua: [0: %d, 1:%d, 2:%s, 3:%f, 4:%g]\n", a, b, c.c_str(), d, e);
+    LOG("c++ testCallback: got params from lua: [0: %d, 1: %d, 2: %s, 3: %f, 4: %g]\n", a, b, c.c_str(), d, e);
 }
+
 
 void testCallback(int (*f)(const std::string&, int, float), int val, const std::string& str)
 {
@@ -364,6 +382,8 @@ void bindToLUA(lua_State * L)
     awesomeMod.fun("testSetSet", testSetSet);
     awesomeMod.fun("testMapMap", testMapMap);
     awesomeMod.fun("testMultipleParams", testMultipleParams);
+    awesomeMod.fun("testTuple", testTuple);
+    awesomeMod.fun("testTuple2", testTuple2);
     awesomeMod.fun("testCallback", testCallback);
     awesomeMod.fun("testCallbackFunctor", testCallbackFunctor);
     awesomeMod.fun("testPosition", testPosition);

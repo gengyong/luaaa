@@ -33,6 +33,7 @@
 
 # Others
 .vs
+.vscode
 example/example
 example/vs2015
 example/example
