@@ -20,35 +20,33 @@ function luaaa:base(obj)
 end
 
 
-
-
 function serialize(obj)
-	local lua = ""
+	local str = ""
 	local t = type(obj)
 	if t == "number" then
-		lua = lua .. obj
+		str = str .. obj
 	elseif t == "boolean" then
-		lua = lua .. tostring(obj)
+		str = str .. tostring(obj)
 	elseif t == "string" then
-		lua = lua ..  obj
+		str = str ..  obj
 	elseif t == "table" then
-		lua = lua .. "{"
+		str = str .. "{"
 		for k, v in pairs(obj) do
-			lua = lua .. "[" .. serialize(k) .. "]=" .. serialize(v) .. ","
+			str = str .. "[" .. serialize(k) .. "]=" .. serialize(v) .. ","
 		end
 		local metatable = getmetatable(obj)
 		if metatable ~= nil and type(metatable.__index) == "table" then
 			for k, v in pairs(metatable.__index) do  
-				lua = lua .. "[" .. serialize(k) .. "]=" .. serialize(v) .. ","
+				str = str .. "[" .. serialize(k) .. "]=" .. serialize(v) .. ","
 			end
 		end
-		lua = lua .. "}"
+		str = str .. "}"
 	elseif t == "nil" then
-		lua = "nil"
+		str = "nil"
 	else  
 		error("can not serialize a " .. t .. " type.")
 	end  
-	return lua  
+	return str  
 end
 
 function luaCallback(param)
@@ -73,9 +71,41 @@ function testAwesomeCat()
 		print(a:testFunctor2(77777, 66666))
 		a:testfunctor(luaCallback)
 	end
+
+	a.say = "I am a cat!";
+	a.age = 12
+	print("=================== a.age:",  a.age)
+	a.name  = "HeroCat";
+	print("=================== a.name:", a.name)
+	a.prop1 = "white";
+	print("=================== a.prop1:", a.prop1)
+	if not WITHOUT_CPP_STDLIB then
+		a.prop2 = 9999123;
+		print("=================== a.prop2:", a.prop2)
+		a.prop3 = { 'aaa', 'bbb', 'ccc', 'ddd' };
+		print("=================== a.prop3:", serialize(a.prop3))
+		a.prop4 = 1.234;
+		print("=================== a.prop3:", a.prop4)
+	end
+	
 end
 
 function testAwesomeMod()
+	print("===================before assign AwesomeMod.notexists:", AwesomeMod.notexists2)
+	AwesomeMod.notexists2 = "asdadsasda";
+	print("=================== after assign AwesomeMod.notexists:", AwesomeMod.notexists2)
+	
+	AwesomeMod.prop1 = "white";
+	print("=================== AwesomeMod.prop1:", AwesomeMod.prop1)
+	if not WITHOUT_CPP_STDLIB then
+		AwesomeMod.prop2 = 9999123;
+		print("=================== AwesomeMod.prop2:", AwesomeMod.prop2)
+		AwesomeMod.prop3 = "abcdefg";
+		print("=================== AwesomeMod.prop3:", serialize(AwesomeMod.prop3))
+		AwesomeMod.prop4 = 1.234;
+		print("=================== AwesomeMod.prop4:", AwesomeMod.prop4)
+	end
+
 	print ("AwesomeMod.cint:" .. AwesomeMod.cint)
 	print ("AwesomeMod.cstr:" .. AwesomeMod.cstr)
 	print ("AwesomeMod.dict:")
@@ -109,18 +139,20 @@ function testAwesomeMod()
 		}
 	});
 
-	print("-------- AwesomeMod.testTuple() --------")
-	local values = AwesomeMod.testTuple({"a duck", 999, 1.234})
-	print("Lua got multiple values from c++:")
-	for i = 1, #values do 
-        print("[" .. i .. "]" .. values[i]) 
-    end 
+	if not WITHOUT_CPP_STDLIB then
+		print("-------- AwesomeMod.testTuple() --------")
+		local values = AwesomeMod.testTuple({"a duck", 999, 1.234})
+		print("Lua got multiple values from c++:")
+		for i = 1, #values do 
+			print("[" .. i .. "]" .. values[i]) 
+		end 
 
-	-- AwesomeMod.testTuple2() accept only empty tuple
-	local values2 = AwesomeMod.testTuple2({"a duck", 999, 1.234})
-	print("Lua got empty tuple from c++.")
-	for k,v in pairs(values2) do
-		print("[" .. tostring(k) .. "]" .. tostring(v))
+		-- AwesomeMod.testTuple2() accept only empty tuple
+		local values2 = AwesomeMod.testTuple2({"a duck", 999, 1.234})
+		print("Lua got empty tuple from c++.")
+		for k,v in pairs(values2) do
+			print("[" .. tostring(k) .. "]" .. tostring(v))
+		end
 	end
 
 	print("-------- AwesomeMod.testMultipleParams() --------")

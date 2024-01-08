@@ -87,25 +87,42 @@ public:
     }
 
     const std::string& getName() const {
+        LOG("Cat:get name\n");
         return m_name; 
     }
 
 
     const std::string& setName(const std::string& name)
     {
+        LOG("Cat:set name to %s\n", name.c_str());
         m_name = name; 
         return m_name;
     }
 
     int setAge(const int age)
     { 
+        LOG("Cat:set age to %d\n", age);
         m_age = age; 
         return m_age;
     }
 
     int getAge() const
     {
+        LOG("Cat:get age\n");
         return m_age; 
+    }
+
+    float setWeight(float w)
+    {
+        LOG("Cat:set weight to %f\n", w);
+        m_weight = w;
+        return m_weight;
+    }
+
+    float getWeight() const
+    {
+        LOG("Cat:get weight\n");
+        return m_weight;
     }
 
     void eat(const std::list<std::string>& foods)
@@ -142,13 +159,24 @@ public:
     }
 
 public:
-    std::string memberVar;
-
+    std::string prop1;
+    std::set<std::string> prop3;
 private:
     std::string m_name;
     int m_age;
     float m_weight;
 };
+
+
+std::string getProp1(const Cat& cat) {
+    printf("*** READ prop1 ***\n");
+    return cat.prop1;
+}
+
+void setProp1(Cat& cat, const std::string& val) {
+    printf("*** WRITE prop1 ***\n");
+    cat.prop1 = val;
+}
 
 
 class SingletonWorld 
@@ -324,11 +352,46 @@ Position testPosition(const Position& a, const Position& b)
 using namespace luaaa;
 
 
+int module__index(lua_State* state) {
+    LOG("~~~~~~~~~~~~~~~~~~module__index:~~~~~~~~~~~~~~~~~~~");
+    lua_pushinteger(state, 999);
+    return 1;
+}
+
+int module__newindex(lua_State* state) {
+    LOG("~~~~~~~~~~~~~~~~~~module__newindex:~~~~~~~~~~~~~~~~~~~");
+    lua_rawset(state, -3);
+    return 0;
+}
+
+void moduleSetProp1(const std::string& val) {
+    LOG("moduleSetProp1:%s", val.c_str());
+    return;
+}
+
+
+const char* moduleGetProp1() {
+    LOG("moduleGetProp1");
+    return "string as prop1 value";
+}
+
+int moduleSetProp2(int val) {
+    LOG("moduleSetProp2:%d", val);
+    return val;
+}
+
+const char* moduleGetProp2() {
+    LOG("moduleGetProp2");
+    return "string as prop2 value";
+}
+
+
+
 void bindToLUA(lua_State * L)
 {
     // bind class to lua
     LuaClass<Cat> luaCat(L, "AwesomeCat");
-    luaCat.ctor<std::string>("new");
+    luaCat.ctor<std::string>();
     luaCat.fun("setName", &Cat::setName);
     luaCat.fun("getName", &Cat::getName);
     luaCat.fun("setAge", &Cat::setAge);
@@ -336,7 +399,6 @@ void bindToLUA(lua_State * L)
     luaCat.fun("eat", &Cat::eat);
     luaCat.fun("speak", &Cat::speak);
     luaCat.fun("test", &Cat::test);
-    luaCat.fun("testSet", testSet);
     luaCat.fun("testfunctor", &Cat::testfunctor);
     luaCat.fun(std::string("testFunctor1"), [](int n1, int n2) -> int {
         LOG("testFunctor1:%d, %d\n", n1, n2);
@@ -347,6 +409,26 @@ void bindToLUA(lua_State * L)
     }));
     luaCat.fun("__tostring", &Cat::toString);
     luaCat.def("tag", "Animal");
+
+    luaCat.set("say", &Cat::speak);
+    luaCat.set("name", &Cat::setName);
+    luaCat.get("name", &Cat::getName);
+    luaCat.set("age", &Cat::setAge);
+    luaCat.get("age", &Cat::getAge);
+
+    luaCat.set("prop1", setProp1);
+    luaCat.get("prop1", getProp1);
+    luaCat.set("prop2", [](const Cat& cat, float val) -> void { printf("set prop2=%f\n", val); /*cat.setWeight(val)*/; });
+    luaCat.get("prop2", [](Cat& cat) -> float { printf("get prop2\n");  return cat.getWeight(); });
+    luaCat.set(std::string("prop3"), [](Cat& cat, const std::set<std::string>& val) { printf("set prop3\n");  cat.prop3 = val; });
+    luaCat.get(std::string("prop3"), [](const Cat& cat) -> std::set<std::string> { printf("get prop3\n");  return cat.prop3; });
+    luaCat.set(std::string("prop4"), [](float val) { printf("set prop4=%f\n", val); });
+    luaCat.get(std::string("prop4"), []() -> float { printf("get prop4\n");  return 0.123f; });
+
+    // rise compile error
+    //luaCat.set(std::string("prop5"), [](float val, int v2) { printf("set prop4=%f\n", val); });
+    //luaCat.get(std::string("prop5"), [](Cat&) -> float { printf("get prop4\n");  return 0.123f; });
+
 
     // bind singleton class to lua
     LuaClass<SingletonWorld> luaWorld(L, "SingletonWorld");
@@ -394,6 +476,18 @@ void bindToLUA(lua_State * L)
         LOG("awesomeMod call testFunctor2(%d * %f = %f):", a, b, a*b);
         return a * b;
     });
+
+    awesomeMod.set("prop1", moduleSetProp1);
+    awesomeMod.get("prop1", moduleGetProp1);
+    awesomeMod.set("prop2", moduleSetProp2);
+    awesomeMod.get("prop2", moduleGetProp2);
+    awesomeMod.set(std::string("prop3"), [](const std::string& val) { printf("set prop3=%s\n", val.c_str()); });
+    awesomeMod.get(std::string("prop3"), []() -> std::string { printf("get prop3\n");  return "string as prop3"; });
+    awesomeMod.set(std::string("prop4"), [](float val) { printf("set prop4=%f\n", val); });
+    awesomeMod.get(std::string("prop4"), [](){ printf("get prop4\n"); return 0.123f; });
+
+    awesomeMod.fun("__index", module__index);
+    awesomeMod.fun("__newindex", module__newindex);
 
     // put something to global, just emit the module name
     LuaModule(L).def("pi", 3.1415926535897932);

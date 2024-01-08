@@ -17,7 +17,7 @@ feel free to report bugs.
 * simple.
 * powerful.
 * no wrapper codes.
-* works with lua from 5.1 to 5.4.
+* works with lua from 5.1 to 5.4, and luajit.
 
 ## Quick Start
 

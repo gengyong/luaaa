@@ -158,6 +158,15 @@ void operator delete(void * p) noexcept {
     free(p);
 }
 
+void * operator new[](size_t sz) {
+    return malloc(sz);
+}
+
+void operator delete[](void* p) {
+    return free(p);
+}
+
+
 class Cat
 {
 public:
@@ -384,7 +393,7 @@ namespace luaaa {
 
 Position testPosition(const Position& a, const Position& b)
 {
-    return Position(a.x + b.x, a.y + b.y, a.z + b.z);
+    return Position(a.x + b.x, a.y + b.y, a.z + b.z);  
 }
 
 
@@ -392,6 +401,14 @@ Position testPosition(const Position& a, const Position& b)
 // below shows ho to bind c++ with lua
 //===============================================
 using namespace luaaa;
+
+const char * getProp1(const Cat& cat) {
+    return cat.getName();
+}
+
+void setProp1(Cat& cat, const char * val) {
+    cat.setName(val);
+}
 
 void bindToLUA(lua_State * L)
 {
@@ -407,6 +424,15 @@ void bindToLUA(lua_State * L)
     luaCat.fun("speak", &Cat::speak);
     luaCat.fun("__tostring", &Cat::toString);
     luaCat.def("tag", "Animal");
+
+    luaCat.set("say", &Cat::speak);
+    luaCat.set("name", &Cat::setName);
+    luaCat.get("name", &Cat::getName);
+    luaCat.set("age", &Cat::setAge);
+    luaCat.get("age", &Cat::getAge);
+
+    luaCat.set("prop1", setProp1);
+    luaCat.get("prop1", getProp1);
 
     // bind singleton class to lua
     LuaClass<SingletonWorld> luaWorld(L, "SingletonWorld");
