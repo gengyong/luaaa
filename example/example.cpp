@@ -426,8 +426,8 @@ void bindToLUA(lua_State * L)
     luaCat.get(std::string("prop4"), []() -> float { printf("get prop4\n");  return 0.123f; });
 
     // rise compile error
-    //luaCat.set(std::string("prop5"), [](float val, int v2) { printf("set prop4=%f\n", val); });
-    //luaCat.get(std::string("prop5"), [](Cat&) -> float { printf("get prop4\n");  return 0.123f; });
+    //luaCat.set(std::string("prop5"), [](float val, int v2) { printf("set prop5=%f\n", val); });
+    //luaCat.get(std::string("prop5"), [](int) -> float { printf("get prop5\n");  return 0.123f; });
 
 
     // bind singleton class to lua

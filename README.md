@@ -3,11 +3,11 @@
 
 Luaaa is a simple tool to bind c++ class to lua. 
 
-It was implement intent to use only one header file, with very simple interface, easy to integrate to exists project.
+It was implemented intent to use only one header file, with simple interface, easy to integrate to existing project.
 
-With luaaa, you don't need to write wrapper codes for exists class/function, and you don't need to run any other tool to generate wrapper codes. Just define the class to export and enjoy using it in lua.
+With luaaa, you don't need to write wrapper codes for existing class/function, and you don't need to run any other tool to generate wrapper codes. Just define the class to export and enjoy using it in lua.
 
-Luaaa has no dependencies to other libs but lua and c++11 standard lib, no cpp files. 
+Luaaa has no dependencies to other libs but lua and c++11 standard lib, no cpp files.
 
 To use it, just copy and include 'luaaa.hpp' in source file.
 
@@ -15,7 +15,6 @@ feel free to report bugs.
 ## Features
 
 * simple.
-* powerful.
 * no wrapper codes.
 * works with lua from 5.1 to 5.4, and luajit.
 
@@ -26,10 +25,10 @@ export a class to lua:
 
 // include luaaa file
 #include "luaaa.hpp"
-using namespace luaaa;	
+using namespace luaaa;
 
 
-// Your exists class
+// Your existing class
 class Cat
 {
 public:
@@ -54,7 +53,7 @@ luaCat.ctor<std::string>();
 luaCat.fun("setName", &Cat::setName);
 luaCat.fun("getName", &Cat::getName);
 luaCat.fun("eat", &Cat::eat);
-// static mmember fuction was exported as Lua class member fuction.
+// static member fuction was exported as Lua class member fuction.
 // from Lua, call it as same as other member fuctions.
 luaCat.fun("speak", &Cat::speak);
 luaCat.def("tag", "Cat");
@@ -72,8 +71,125 @@ cat:speak("Thanks!");
 
 ```
 
-to export constructors, for example, instance getter of singleton pattern:
+you can add property to AwesomeCat:
+```cpp
+luaCat.set("name", &Cat::setName);
+luaCat.get("name", &Cat::getName);
+luaCat.set("age", &Cat::setAge);
+luaCat.get("age", &Cat::getAge);
 ```
+
+then you can access property from lua as below:
+```lua
+local oldName = cat.name;
+print("cat's old name:", oldName);
+cat.name = "NewName";
+print("cat's new name:", cat.name);
+```
+for the property getter, property type depends on the return value of getter function.
+
+property getter accepts a function likes below:
+```cpp
+// 1) member function of origin c++ class which has no parameter
+luaCat.get("name", &Cat::getName);
+
+// 2) global function which has no parameter
+//std::string getProp1() {
+//    return "whatever";
+//}
+luaCat.get("prop1", getProp1);
+
+// 3) global function which has origin c++ class as the only ONE parameter, parameter can be const or non-const.
+//std::string getProp2(const Cat& cat) {
+//    return cat.name;
+//}
+luaCat.get("prop2", getProp2);
+
+// 4) a lambda function which has no parameter
+luaCat.get("prop3", []() -> float { return 0.123f; });
+
+// 5) a lambda function which has origin c++ class as the only ONE parameter, parameter can be const or non-const.
+luaCat.get("prop4", [](Cat& cat) -> float { return cat.getWeight(); });
+
+```
+
+for the property setter, property type depends on the parameter of setter function.
+
+property setter accepts a function likes below:
+```cpp
+// 1) member function of origin c++ class which has only ONE parameter
+// in lua,
+//   cat.name = "some thing...";
+// will call c++ function:
+//   catObject.setName("some thing...");
+luaCat.set("name", &Cat::setName);
+// in lua,
+//   cat.age = 2;
+// will call c++ function:
+//   catObject.setAge(2);
+luaCat.set("age", &Cat::setAge);
+
+// 2) global function which has only ONE parameter
+//void setProp1(cons std::string p) {
+//    // do some thing...
+//}
+// in lua,
+//   cat.prop1 = "prop value";
+// will call c++ function:
+//   setProp1("prop value");
+luaCat.set("prop1", setProp1);
+
+// 3) global function which accepts an origin c++ class and an extra parameter, origin c++ class can be const or non-const.
+//void setProp2(Cat& cat, const std::string p) {
+//    cat.setName(p);
+//}
+// in lua,
+//   cat.prop2 = "prop value";
+// will call c++ function:
+//   setProp2(catObject, "prop value");
+luaCat.set("prop2", setProp2);
+
+// 4) lambda function which has only ONE parameter
+luaCat.set("prop3", [](float val) -> void { printf("set prop3=%f\n", val); });
+
+// 5) lambda function which accepts an origin c++ class and an extra parameter, origin c++ class can be const or non-const.
+luaCat.set("prop4", [](Cat& cat, float val) -> void { cat.setWeight(val); });
+```
+
+if a property has only getter, it's read-only, if it has only setter, it's write-only, or if has both setter and getter, it can be read&write.
+
+if write a read-only property, or read a write-only property from lua, a lua exception will be rised:
+
+for example, with below defination:
+```cpp
+LuaClass<Cat> luaCat(state, "AnotherCat");
+luaCat.ctor<std::string>();
+luaCat.set("name", &Cat::setName);
+luaCat.get("age", &Cat::getAge);
+```
+
+in lua:
+```lua
+local cat = AnotherCat.new("Orange");
+print("Cat name:", cat.name);
+```
+will rise below exception:
+```bash
+lua err: [string "console"]:79: attempt to read Write-Only property 'name' of 'AwesomeCat'
+```
+
+```lua
+local cat = AnotherCat.new("Orange");
+cat.age = 10;
+```
+will rise below exception:
+```bash
+lua err: [string "console"]:1: attempt to write Read-Only property 'age' of 'AwesomeCat'
+```
+
+
+to export constructors, for example, instance getter of singleton pattern:
+```cpp
 LuaClass<SingletonWorld> luaWorld(L, "SingletonWorld");
 /// use class constructor as instance spawner, default destructor will be called from gc.
 luaWorld.ctor<std::string>();
@@ -135,7 +251,11 @@ void func2(int, int, int);
 int  func3(int, const char *, float, int, int , float);
 bool globalFunc(const std::string&, const std::map<std::string, std::string>&);
 
-lua_State * state; // create and init lua
+lua_State * state; 
+
+/*
+ init lua state here...
+*/
 
 LuaModule(state, "moduleName") MyMod;
 MyMod.fun("func1", func1);
@@ -204,6 +324,8 @@ MyMod.fun("lambdaFunc", [](int a, int b) -> int {
     return a * b;
 });
 ```
+
+
 
 
 to extend exported lua class, add below codes to your project:

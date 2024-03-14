@@ -1232,7 +1232,7 @@ namespace LUAAA_NS
                             else
                             {
                                 // do nothing here. nil will be return.
-                                // luaL_error(state, "attempt to access Non-exists property '%s' of '%s'", key, LuaClass<TCLASS, TAG>::klassName);
+                                // luaL_error(state, "attempt to access Non-existing property '%s' of '%s'", key, LuaClass<TCLASS, TAG>::klassName);
                             }
                         }
                     }
@@ -1291,7 +1291,7 @@ namespace LUAAA_NS
                             }
                             else
                             {
-                                luaL_error(state, "attempt to access Non-exists property '%s' of '%s'", key, LuaClass<TCLASS, TAG>::klassName);
+                                luaL_error(state, "attempt to access Non-existing property '%s' of '%s'", key, LuaClass<TCLASS, TAG>::klassName);
                             }
                         }
                     }
@@ -2219,7 +2219,7 @@ namespace LUAAA_NS
                             else
                             {
                                 // do nothing here. nil will be return.
-                                // luaL_error(state, "attempt to access Non-exists property '%s' of '%s'", key, LuaClass<TCLASS, TAG>::klassName);
+                                // luaL_error(state, "attempt to access Non-existing property '%s' of '%s'", key, LuaClass<TCLASS, TAG>::klassName);
                             }
                         }
                     }
