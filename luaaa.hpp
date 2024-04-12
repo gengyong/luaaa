@@ -2523,7 +2523,7 @@ namespace LUAAA_NS
 #else
             luaL_Reg regtab = { nullptr, nullptr };
             luaL_openlib(m_state, m_moduleName, &regtab, 0);
-            auto uData = (LuaClass<TCLASS, TAG>::UserDataDetail*)lua_newuserdata(m_state, sizeof(LuaClass<TCLASS, TAG>::UserDataDetail));
+            auto uData = (typename LuaClass<TCLASS, TAG>::UserDataDetail*)lua_newuserdata(m_state, sizeof(typename LuaClass<TCLASS, TAG>::UserDataDetail));
             if (uData)
             {
                 uData->obj = userData.obj;
