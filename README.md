@@ -33,6 +33,7 @@ class Cat
 {
 public:
 	Cat();
+	Cat(const std::string& name);
 	virtual ~Cat();
 public:
 	void setName(const std::string&);
