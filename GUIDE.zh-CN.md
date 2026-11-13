@@ -12,13 +12,15 @@
 6. [属性详解](#属性详解)
 7. [`def`：常量、数组与内嵌实例](#def常量数组与内嵌实例)
 8. [元方法](#元方法)
-9. [多个 `lua_State`](#多个-lua_state)
-10. [嵌入式 / 无标准库构建](#嵌入式--无标准库构建)
-11. [特性宏](#特性宏)
-12. [字符串生命周期：`const char*` 与 `std::string`](#字符串生命周期const-char-与-stdstring)
-13. [对象生命周期与 GC 所有权](#对象生命周期与-gc-所有权)
-14. [兼容性说明](#兼容性说明)
-15. [排错 / FAQ](#排错--faq)
+9. [错误与异常](#错误与异常)
+10. [Lua 侧继承详解](#lua-侧继承详解)
+11. [多个 `lua_State`](#多个-lua_state)
+12. [嵌入式 / 无标准库构建](#嵌入式--无标准库构建)
+13. [特性宏](#特性宏)
+14. [字符串生命周期：`const char*` 与 `std::string`](#字符串生命周期const-char-与-stdstring)
+15. [对象生命周期与 GC 所有权](#对象生命周期与-gc-所有权)
+16. [兼容性说明](#兼容性说明)
+17. [排错 / FAQ](#排错--faq)
 
 ---
 
@@ -29,6 +31,7 @@
 | 类别 | 类型 |
 |---|---|
 | 浮点数 | `float`、`double`、`long double` |
+| 枚举 | 任意 `enum` / `enum class` —— 按其底层整数类型转换 |
 | 布尔 | `bool` |
 | 整数 | `int`、`long`、`long long`、`short`、`char` 以及它们对应的 `unsigned` 版本 —— 所以各种别名（`size_t`、`int64_t`、`uint32_t`、`ptrdiff_t` 等）也都天然支持 |
 | 字符串 | `const char*`、`char*`、`std::string` |
@@ -41,11 +44,17 @@
 
 容器的转换规则：顺序容器在 Lua 侧表现为数组式表（`{1,2,3}`），映射变为键值表（`{a=1}`），`pair`/`tuple` 变为按位置排列的表（`{first, second}`）。
 
+反方向读取时，顺序容器**和集合**都按 `ipairs` 的方式读表：`t[1]`、`t[2]`…… 直到第一个 `nil`。所以无论表是怎么构造出来的，顺序永远是数组顺序；存在非数组键下的值（`{ 'a', 'b', x = 'c' }` 里的 `'c'`）也不会被混进来。映射则读取全部键值对。
+
 > ⚠️ **整型在不同 Lua 版本下的精度问题。** 所有整型都通过 `lua_Integer` 来中转。在 Lua 5.3/5.4 里 `lua_Integer` 是 64 位的，所以 `int`/`long`/`size_t` 之类都能完整地往返。但在 **Lua 5.1/5.2 和 LuaJIT** 里，数字底层是 double，超过 2⁵³ 的整数就会丢精度。此外，即便在 5.3+ 上，64 位无符号整数值 ≥ 2⁶³ 也会被映射为负的 `lua_Integer`。这些都属于 Lua 本身的设计限制 —— 如果你在旧版 Lua 上需要精确传递大整型，建议改用字符串。
 >
-> ⚠️ **浮点溢出会被检测。** 每个浮点值都会经过 `lua_Number` 来转换。如果值超出了目标类型能表示的范围 —— 比如把一个很大的 `long double` 塞进 `double` 型的 `lua_Number`，或者把 double 值的 Lua number 读到 `float` 里 —— luaaa 会直接报 Lua 错误，而不是悄悄生成一个 `inf`。对于范围以内但精度有损的情况（比如尾数截断，以及在 Lua 5.1/5.2/LuaJIT 上的任何浮点操作），这是 Lua 本身决定的，不会额外报错。
+> ⚠️ **整数入参会做范围检查。** 如果 Lua 数值放不进它要传给的 C++ 整数参数，会抛 Lua 错误（`number overflow`），而不是静默回绕：比如把 `300` 传给 `uint8_t`、把 `2^40` 传给 `int`、把 `-1` 传给 `unsigned int`。有一个刻意保留的例外：**与 `lua_Integer` 等宽的无符号类型**（5.3+ 上的 `uint64_t`）仍然接受负值并按位解释 —— 因为脚本只能这样写出 `0xFFFFFFFFFFFFFFFF` 这类 64 位掩码（它作为 `lua_Integer` 就是 `-1`）。把 `LUAAA_CHECK_INTEGER_RANGE` 定义为 `0` 可以恢复原先的静默 `static_cast` 回绕。
 >
-> 非算术类型的标量（如 `enum`、裸结构体）目前没有内置特化，需要自己写 `LuaStack`（见下一节）。
+> ⚠️ **浮点溢出会被检测。** 每个浮点值都会经过 `lua_Number` 来转换。如果值超出了目标类型能表示的范围 —— 比如把一个很大的 `long double` 塞进 `double` 型的 `lua_Number`，或者把 double 值的 Lua number 读到 `float` 里 —— luaaa 会直接报 Lua 错误，而不是悄悄生成一个 `inf`。只有「有限但放不下」的值才算溢出：真正的无穷大（`math.huge`，或者 C++ 返回的 `inf`）是每种浮点类型都能表示的合法值，两个方向都会原样通过，NaN 也一样。对于范围以内但精度有损的情况（比如尾数截断，以及在 Lua 5.1/5.2/LuaJIT 上的任何浮点操作），这是 Lua 本身决定的，不会额外报错。
+>
+> **枚举**在 Lua 侧就是普通数字。枚举类型的参数接收一个数字，并沿用底层类型的检查（传入非数字是类型错误；把 `300` 传给 `enum class Mode : uint8_t` 会报 `number overflow`）。但落在底层类型范围内、却不对应任何枚举项的值不会被拒绝 —— C++ 本身也不拒绝。枚举项可以用 `def` 导出为常量：`LuaModule(L, "Mode").def("Auto", Mode::Auto)`。如果你自己写了 `LuaStack<MyEnum>` 特化（比如想接受字符串形式的名字），仍然以你的为准。
+>
+> 其他非算术类型的标量（如裸结构体）没有内置特化，需要自己写 `LuaStack`（见下一节）。
 
 ## 教会 luaaa 你自己的类型
 
@@ -95,6 +104,8 @@ cat.ctor("shared", &Cat::instance, nullptr);
 
 spawner 的类型是 `TCLASS* (*)(ARGS...)`；析构器是 `R (*)(TCLASS*)`。两者都可以是静态成员或自由函数。
 
+**缺少参数。** 调用构造函数时少传的参数按 `nil` 处理，和 Lua 里其他地方一样：对 `ctor<std::string>` 调用 `Cat.new()` 会报 `bad argument #1 ... (string expected, got nil)`。多传的参数会被忽略。
+
 **命名冲突。** 如果两个构造函数用了同一个 Lua 名字，后注册的会覆盖先注册的。`LUAAA_CHECK_CONSTRUCTOR_NAME_CONFLICT` 默认值为 `1`，luaaa 会在这种情况下打出一条警告，帮你及时发现问题。
 
 ## 重载函数与消歧
@@ -139,6 +150,11 @@ void onEvent(int (*cb)(const char*));      // (b) 裸函数指针
 * 同一个签名在同一时刻最多只能有**一个**有效回调 —— 再注册一个新的就会把旧的覆盖掉；
 * **不支持**重入，也不是线程安全的；
 * Lua 的引用要等到整个 state 关闭时才会释放（在此之前算泄漏）。
+
+**两种形式**都遵循下面几条规则：
+* Lua 函数运行在虚拟机的**主线程**上，而不是恰好把它传进来的那个协程 —— 所以在协程里注册的回调，在该协程结束并被回收之后依然有效。（Lua 5.1/LuaJIT 的 registry 里没有主线程槽位，luaaa 会在你绑定 `LuaClass`/`LuaModule` 时记下主线程；请在主 state 上完成绑定。）
+* 如果参数是已绑定类的引用（`std::function<void(Cat&)>`、`const Cat&`），Lua 拿到的是该 C++ 对象的**非拥有别名** —— Lua 函数里做的修改调用方看得见，回调返回之后不能再保留这个别名。想让 Lua 拿到自己的一份拷贝，就按值传（`Cat`）。
+* 整个调用过程 —— 实参转换、Lua 函数本身、返回值转换 —— 都在同一次**保护调用**里完成。如果 Lua 函数抛错，或者某个实参/返回值无法转换（例如本该返回 `int` 却返回了字符串），回调会返回默认构造的 `RET()`（`void` 则什么都不返回）；Lua 错误不会穿过调用方的 C++ 栈帧。定义 `LUAAA_DEBUG` 可以把被吞掉的错误信息打印到 `stderr`。
 
 除非你只需要一个简单的、长期有效的回调（或者在使用[嵌入式构建](#嵌入式--无标准库构建)模式，那是唯一选择），否则一律推荐用 `std::function`。
 
@@ -199,6 +215,40 @@ cat.fun("__tostring", &Cat::toString);   // print(obj) / tostring(obj)
 但 `__index`、`__newindex` 和 `__gc` 这三个比较特别，因为 luaaa 内部依赖它们来实现属性和 GC。当你绑定了这几个元方法时，luaaa 会保留自己的分发逻辑，然后把你提供的实现**作为后备**，在内置方法和属性查找执行完毕之后再调用。也就是说，你自定义的 `__index` 只处理那些既不是绑定方法也不是注册属性的键；而你自定义的 `__gc` 会在对象的析构逻辑之外额外执行一遍。
 
 实例读取（`obj.key`）时的查找顺序为：绑定方法与常量 → 已注册的 getter → 你的 `__index`（函数或表）→ *（如果有 setter）* 只写报错 → `nil`。
+
+## 错误与异常
+
+绑定调用里出的任何问题，最终都表现为普通的 Lua 错误（用 `pcall` 捕获）：
+
+* 实参不对 —— `bad argument #2 to 'feed' (number expected, got string)`、传错了类、数值超出范围；
+* 你的函数、构造函数或属性访问器抛出了 C++ 异常 —— `luaaa: function call failed: <what()>`。
+
+Lua 用 `longjmp` 抛错，而 `longjmp` 不会执行 C++ 析构函数，所以 luaaa 把两边隔开处理：某个实参转换失败时，排在它前面、已经转换好的实参（字符串、容器、按值对象）会先经正常的 C++ 栈展开被析构，**然后**才抛 Lua 错误；捕获到的 C++ 异常也会先被完整处理掉（不会一直处于“处理中”状态），然后才抛 Lua 错误。不带异常的构建（`-fno-exceptions`）没有这些步骤，直接抛错。
+
+自己写转换代码时需要知道两点：
+* 在自定义的 `LuaStack<T>::get` 里，用常规的 `luaL_error` / `luaL_argerror` 报告错误值即可 —— 或者直接基于库里已有的特化来写，它们已经处理好了。
+* 在裸 `lua_CFunction` 里直接使用 `LuaStack<T>::get`，行为和 `luaL_check*` 系列完全一样：抛 Lua 错误。
+
+## Lua 侧继承详解
+
+`luaaa:extend(Base, fields)` 返回一张普通的类表：`fields`（或 `{}`）再加上 `new`。之后可以随时往上加方法和默认值。
+
+```lua
+local SpecialCat = luaaa:extend(Cat, { tricks = 0 })
+function SpecialCat:learn() self.tricks = self.tricks + 1 end
+
+local a = SpecialCat:new("Felix")     -- 每次调用都得到一个【新】实例……
+local b = SpecialCat:new("Tom")       -- ……各自拥有自己的 C++ Cat
+a:learn()                             -- a.tricks == 1, b.tricks == 0, SpecialCat.tricks == 0
+
+local ShowCat = luaaa:extend(SpecialCat, { ribbons = 0 })   -- 扩展出来的类还可以继续扩展
+```
+
+* 实例上的**查找顺序**：实例自己的字段 → 类表（以及它所扩展的各级类，由近及远）→ C++ 类的方法和属性 → C++ 类的自定义 `__index`。
+* **写入** `obj.key = v`：如果 `key` 是属性就调用 C++ setter；否则只在这个实例上设置字段。
+* 凡是 C++ 按引用接收该绑定类的地方（`void groom(Cat&)`）都可以传实例；`luaaa:base(obj)` 返回底层的 C++ 对象，比如用来调用被你覆盖掉的方法。
+* 绑定在 C++ 类上的元方法（`__tostring`、`__eq` 等）对实例同样生效。实例的 metatable 是在某个类第一次实例化时从 C++ 类的 metatable 派生出来的，所以请在脚本开始创建实例之前完成 C++ 类的绑定。
+* C++ 对象的生命周期与持有它的实例表完全一致。
 
 ## 多个 `lua_State`
 
@@ -265,6 +315,7 @@ void  operator delete(void* p) noexcept { free(p); }
 | `LUAAA_FEATURE_PROPERTY` | `1` | 启用 `get`/`set` 属性机制（即 `__index`/`__newindex` 底层）。 |
 | `LUAAA_FEATURE_EXTEND` | `1` | 自动注入 `luaaa:extend` 和 `luaaa:base` 以支持 Lua 侧的类继承。 |
 | `LUAAA_CHECK_CONSTRUCTOR_NAME_CONFLICT` | `1` | 两个构造函数使用了相同的 Lua 名字时打印警告。 |
+| `LUAAA_CHECK_INTEGER_RANGE` | `1` | Lua 数值放不进目标 C++ 整数参数时抛 Lua 错误；设为 `0` 恢复静默回绕。 |
 | `LUAAA_DEBUG` | `0` | 启用 `LUAAA_DUMP(L)` 栈内容转储的辅助功能。 |
 
 ## 字符串生命周期：`const char*` 与 `std::string`
@@ -309,6 +360,8 @@ public:
 | 绑定函数以 `T*` 或 `T&` 返回 | 带类型的**非拥有别名**（full userdata，挂类 metatable，`dtor=nullptr`）；Lua 永远不销毁它 |
 | 绑定函数以 `T`（按值）返回 | 带类型的**拥有拷贝**；GC 时调用 `~T()` |
 
+一个对象**最多只会被终结一次**。脚本可以直接调用 `__gc`（`obj:__gc()`）：这会立刻执行析构函数/自定义析构器，之后 GC 的那次调用变成空操作，再使用该对象会报 `invalid user data`，而不是访问已析构的对象。自定义析构器保存在对象自身里，所以即使类表（及其构造函数）先被回收，它依然可以被安全调用。
+
 返回 `T*`/`T&` 会包装成携带类 metatable 的 full userdata：方法可以继续调用，回传时也会做类型检查（传错类会被拒绝，不再像过去的无类型 lightuserdata 那样照单全收）。它别名到 C++ 对象本体 —— 对象的存活需要你自己保证；`nullptr` 会变成 Lua 的 `nil`。按值返回 `T` 则拷贝构造进 userdata，由 GC 正常回收。指针/引用的类如果**没有**在该 state 绑定，仍退化为普通 lightuserdata（传统的透明句柄模式）；而未绑定类按值返回则会直接报错（而不是产生悬垂指针）。
 
 ## 兼容性说明
@@ -319,13 +372,13 @@ public:
 
 ## 排错 / FAQ
 
-**`cpp class 'X' not export`** —— luaaa 被要求转换一个它还没有绑定或特化的类型。常见原因：(1) 你在当前 state 里的 `LuaClass<X>` 构造完成之前就调用了方法；(2) 绑定的函数签名中用到了没有特化的标量类型（比如 `enum` 或裸结构体）—— 给它补一个 `LuaStack` 就行；(3) 你把这个对象用在了跟绑定时不同的 `lua_State` 里。
+**`cpp class 'X' not export`** —— luaaa 被要求转换一个它还没有绑定或特化的类型。常见原因：(1) 你在当前 state 里的 `LuaClass<X>` 构造完成之前就调用了方法；(2) 绑定的函数签名中用到了没有特化的类型（比如从未绑定过的裸结构体）—— 把它绑定出去，或者给它补一个 `LuaStack`；(3) 你把这个对象用在了跟绑定时不同的 `lua_State` 里。
 
 **`C++ class '...' bind to conflict lua name`** —— 你在同一个 state 里把同一个 C++ 类型绑定到了两个不同的 Lua 名字。解决方法：每个 state 用一个名字；或者用不同的 state；或者把它封装成不同的包装类型（参见[多个 lua_State](#多个-lua_state)）。
 
 **`lua name '...' already bound to a different cpp class`** —— 反过来的冲突：两个**不同**的 C++ 类型试图在同一个 state 里共用同一个 Lua 名字。那样它们会静默共享同一个 metatable（并且互相通过对方的类型检查），所以 luaaa 直接拒绝第二次绑定。给每个类型各起一个名字即可。
 
-**静态方法用 `Class.method()` 调用报 "nil value"** —— 通过 `fun` 绑定的静态/自由函数是按方法方式调用的，所以要用 `instance:method(args)` 的写法。冒号前面的实例充当被跳过的 `self`。
+**静态方法用 `Class.method()` 调用报 "nil value"** —— 通过 `LuaClass::fun` 绑定的静态/自由函数是按方法方式调用的，所以要用 `instance:method(args)` 的写法。冒号前面的实例充当被跳过的 `self`。如果想要真正的 `Class.method()`（或者 `Class.MAX` 这样的常量），用一个同名模块把它挂到类表上：`LuaModule(L, "Cat").fun("count", &Cat::count).def("MAX", 9);` —— 这样 `Cat.count()` 就能和 `Cat.new()` 并存，两者的绑定顺序不限。
 
 **`attempt to read Write-Only` / `write Read-Only property`** —— 这个属性你只注册了 setter（只写）或只注册了 getter（只读）。如果两个方向都需要，把缺的那个访问器也注册上就好。
 

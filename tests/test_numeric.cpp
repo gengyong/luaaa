@@ -4,6 +4,7 @@
 #include "luaaa.hpp"
 #include <cstdio>
 #include <cstdint>
+#include <limits>
 using namespace luaaa;
 
 static int P = 0, F = 0;
@@ -23,7 +24,11 @@ static int64_t            echo_i64(int64_t v)            { return v; }   // 别�
 static float              echo_f  (float v)              { return v; }
 static double             echo_d  (double v)             { return v; }
 static long double        echo_ld (long double v)        { return v; }   // 新纳入
-static long double        big_ld  ()                     { return 1e300L * 1e300L; } // 远超 lua_Number 范围
+// long double 的最大有限值。x86 上 long double 比 lua_Number(double) 宽, 这个值放不进去;
+// arm64 / MSVC 上 long double 就是 double, 它正好等于 DBL_MAX, 可以原样往返。
+// (原先用 1e300L * 1e300L: 在等宽平台上它其实是 +inf, 靠「inf 也算溢出」才通过;
+//  第九轮 R9-1 起 inf 不再算溢出, 所以改成一个确定有限的值。)
+static long double        big_ld  ()                     { return std::numeric_limits<long double>::max(); }
 
 int main() {
     lua_State* L = luaL_newstate(); luaL_openlibs(L);
@@ -68,9 +73,14 @@ int main() {
     // 溢出检查：get 方向 lua_Number(double) -> float 收窄溢出应报错
     check(luaL_dostring(L, "assert(pcall(num.f, 1e300) == false)") == 0,
           "float get 溢出报错 (1e300 不入 float)");
-    // 溢出检查：put 方向 long double -> lua_Number 溢出应报错
-    check(luaL_dostring(L, "assert(pcall(num.bigld) == false)") == 0,
-          "long double put 溢出报错 (>lua_Number 范围)");
+    // 溢出检查：put 方向 long double -> lua_Number, 有限但放不下的值应报错
+    if (std::numeric_limits<long double>::max_exponent > std::numeric_limits<lua_Number>::max_exponent) {
+        check(luaL_dostring(L, "assert(pcall(num.bigld) == false)") == 0,
+              "long double put 溢出报错 (>lua_Number 范围)");
+    } else {
+        check(luaL_dostring(L, "local v = num.bigld(); assert(v > 1e308 and v < math.huge)") == 0,
+              "long double 最大值可返回 (本平台 long double 与 lua_Number 等宽)");
+    }
 
     printf("\n=== numeric: %d passed, %d failed ===\n", P, F);
     return F > 0 ? 1 : 0;

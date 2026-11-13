@@ -12,13 +12,15 @@ This guide is a reference and FAQ for people who already know the basics from th
 6. [Properties in depth](#properties-in-depth)
 7. [`def`: constants, arrays & embedded instances](#def-constants-arrays--embedded-instances)
 8. [Metamethods](#metamethods)
-9. [Multiple `lua_State`s](#multiple-lua_states)
-10. [Embedded / no-stdlib builds](#embedded--no-stdlib-builds)
-11. [Feature macros](#feature-macros)
-12. [String lifetime: `const char*` vs `std::string`](#string-lifetime-const-char-vs-stdstring)
-13. [Object lifetime & GC ownership](#object-lifetime--gc-ownership)
-14. [Compatibility notes](#compatibility-notes)
-15. [Troubleshooting / FAQ](#troubleshooting--faq)
+9. [Errors & exceptions](#errors--exceptions)
+10. [Lua-side inheritance in depth](#lua-side-inheritance-in-depth)
+11. [Multiple `lua_State`s](#multiple-lua_states)
+12. [Embedded / no-stdlib builds](#embedded--no-stdlib-builds)
+13. [Feature macros](#feature-macros)
+14. [String lifetime: `const char*` vs `std::string`](#string-lifetime-const-char-vs-stdstring)
+15. [Object lifetime & GC ownership](#object-lifetime--gc-ownership)
+16. [Compatibility notes](#compatibility-notes)
+17. [Troubleshooting / FAQ](#troubleshooting--faq)
 
 ---
 
@@ -29,6 +31,7 @@ Every value that crosses the C++ ⇄ Lua boundary goes through `LuaStack<T>`, wh
 | Category | Types |
 |---|---|
 | Floating | `float`, `double`, `long double` |
+| Enumerations | any `enum` / `enum class` — converted through its underlying integer type |
 | Boolean | `bool` |
 | Integers | `int`, `long`, `long long`, `short`, `char` and their `unsigned` forms — and therefore every alias (`size_t`, `int64_t`, `uint32_t`, `ptrdiff_t`, …) |
 | Strings | `const char*`, `char*`, `std::string` |
@@ -41,11 +44,17 @@ Every value that crosses the C++ ⇄ Lua boundary goes through `LuaStack<T>`, wh
 
 Containers map to Lua tables: sequences become array-style tables (`{1,2,3}`), maps become key/value tables (`{a=1}`), `pair`/`tuple` become positional tables (`{first, second}`).
 
+Going the other way, sequences **and sets** are read like `ipairs` walks a table: `t[1]`, `t[2]`, … up to the first `nil`. The order is therefore always the array order, however the table was built, and values stored under non-array keys (`{ 'a', 'b', x = 'c' }`) are not swept in. Maps read every key/value pair.
+
 > ⚠️ **Integer precision across Lua versions.** All integer types are converted through `lua_Integer`. On Lua 5.3/5.4 that's 64-bit, so `int`/`long`/`size_t` round-trip exactly. On **Lua 5.1/5.2 and LuaJIT** numbers are doubles, so any integer beyond 2⁵³ loses precision. Also, an `unsigned` 64-bit value ≥ 2⁶³ maps to a negative `lua_Integer` even on 5.3+. This is an inherent Lua limitation — keep large 64-bit integers as strings if you need them exact on older Lua.
 >
-> ⚠️ **Floating-point overflow is checked.** Every FP value is converted through `lua_Number`. If a value can't fit — a huge `long double` pushed into a `double`-typed `lua_Number`, or a `double`-valued Lua number read back into a `float` — luaaa raises a Lua error rather than silently producing `inf`. Precision loss *within* range (mantissa truncation, or any FP on Lua 5.1/5.2/LuaJIT) is inherent to Lua and is not reported.
+> ⚠️ **Integer arguments are range-checked.** A Lua number that does not fit the C++ integer parameter it is passed to raises a Lua error (`number overflow`) instead of wrapping: `300` into a `uint8_t`, `2^40` into an `int`, `-1` into an `unsigned int`. One deliberate exception: an **unsigned type as wide as `lua_Integer`** (`uint64_t` on 5.3+) still accepts a negative value as its bit pattern — that is the only way a script can spell a 64-bit mask such as `0xFFFFFFFFFFFFFFFF` (which *is* `-1` as a `lua_Integer`). Define `LUAAA_CHECK_INTEGER_RANGE` as `0` to get the old silent `static_cast` wrap-around back.
 >
-> Non-arithmetic scalars (`enum`, raw structs) still have no specialization; add a `LuaStack` for those (next section).
+> ⚠️ **Floating-point overflow is checked.** Every FP value is converted through `lua_Number`. If a value can't fit — a huge `long double` pushed into a `double`-typed `lua_Number`, or a `double`-valued Lua number read back into a `float` — luaaa raises a Lua error rather than silently producing `inf`. Only a *finite* value that does not fit is an overflow: an actual infinity (`math.huge`, or `inf` returned from C++) is a legal value of every floating type and passes through in both directions, as does NaN. Precision loss *within* range (mantissa truncation, or any FP on Lua 5.1/5.2/LuaJIT) is inherent to Lua and is not reported.
+>
+> **Enumerations** are plain numbers on the Lua side. A parameter of enum type takes a number and gets the checks of the underlying type (a non-number is a type error; `300` into an `enum class Mode : uint8_t` is a `number overflow`), but a value inside that range that names no enumerator is not rejected — C++ does not reject it either. Export the enumerators as constants with `def`: `LuaModule(L, "Mode").def("Auto", Mode::Auto)`. A `LuaStack<MyEnum>` specialization of your own (e.g. to accept names as strings) still takes precedence.
+>
+> Other non-arithmetic scalars (raw structs) have no specialization; add a `LuaStack` for those (next section).
 
 ## Teaching luaaa your own types
 
@@ -95,6 +104,8 @@ cat.ctor("shared", &Cat::instance, nullptr);
 
 A spawner is `TCLASS* (*)(ARGS...)`; a deleter is `R (*)(TCLASS*)`. Both may be static members or free functions.
 
+**Missing arguments.** An argument left out of a constructor call reads as `nil`, as everywhere else in Lua: `Cat.new()` against `ctor<std::string>` fails with `bad argument #1 ... (string expected, got nil)`. Extra arguments are ignored.
+
 **Name conflicts.** Two constructors with the same Lua name: the later one overwrites the earlier. When `LUAAA_CHECK_CONSTRUCTOR_NAME_CONFLICT` is `1` (the default), luaaa prints a warning to help you catch it.
 
 ## Overloaded functions & disambiguation
@@ -139,6 +150,11 @@ The Lua reference is released when the callback object and all its copies are de
 * only **one** callback of a given signature can be live at a time — registering another overwrites it;
 * it is **not** re-entrant or thread-safe;
 * the reference is not released until the state is closed (it leaks meanwhile).
+
+**Both forms** share these rules:
+* The Lua function runs on the VM's **main thread**, not on whichever coroutine happened to pass it in — so a callback registered from inside a coroutine stays valid after that coroutine has finished and been collected. (On Lua 5.1/LuaJIT, which have no registry slot for the main thread, luaaa notes it when you bind a `LuaClass`/`LuaModule`; do your binding on the main state.)
+* A parameter that is a reference to a bound class (`std::function<void(Cat&)>`, `const Cat&`) reaches Lua as a **non-owning alias** of the C++ object — changes made by the Lua function are visible to the caller, and the alias must not be kept after the callback returns. Pass by value (`Cat`) to hand Lua its own copy.
+* The whole call — arguments in, the Lua function, the result out — runs under one **protected call**. If the Lua function raises, or an argument/return value can't be converted (e.g. it returns a string where an `int` is expected), the callback returns a default-constructed `RET()` (nothing for `void`); a Lua error never propagates through the C++ frames of whoever invoked the callback. Define `LUAAA_DEBUG` to have the swallowed message printed to `stderr`.
 
 Use the raw form only for a single, simple, long-lived callback (it's the only option in [embedded builds](#embedded--no-stdlib-builds)); otherwise prefer `std::function`.
 
@@ -199,6 +215,40 @@ cat.fun("__tostring", &Cat::toString);   // print(obj) / tostring(obj)
 Three are special because luaaa uses them internally to implement properties and GC: `__index`, `__newindex`, `__gc`. When you bind one of these, luaaa keeps its own dispatcher installed and calls **yours as a fallback**, after built-in method and property lookup. So a custom `__index` handles only keys that aren't a bound method or property; a custom `__gc` runs in addition to the object's destructor.
 
 Property/method lookup order for an instance read (`obj.key`): bound methods & constants → registered getter → your `__index` (function or table) → *(if a setter exists)* write-only error → `nil`.
+
+## Errors & exceptions
+
+Everything that goes wrong inside a bound call surfaces as an ordinary Lua error (catch it with `pcall`):
+
+* a wrong argument — `bad argument #2 to 'feed' (number expected, got string)`, a wrong class, a number out of range;
+* a C++ exception thrown by your function, constructor or property accessor — `luaaa: function call failed: <what()>`.
+
+Lua raises errors with `longjmp`, which runs no C++ destructors, so luaaa keeps the two worlds apart: when an argument fails to convert, the arguments converted before it (strings, containers, by-value objects) are destroyed by normal C++ unwinding *before* the Lua error is raised; and a caught C++ exception is fully handled (not left "in flight") before the Lua error is raised. Builds without exceptions (`-fno-exceptions`) skip all of this and raise directly.
+
+Two things to know when you write conversion code yourself:
+* Inside a custom `LuaStack<T>::get`, report a bad value with the usual `luaL_error` / `luaL_argerror` — or build on the shipped specializations, which already do the right thing.
+* `LuaStack<T>::get` used directly in a raw `lua_CFunction` behaves exactly like the `luaL_check*` family: it raises a Lua error.
+
+## Lua-side inheritance in depth
+
+`luaaa:extend(Base, fields)` returns an ordinary class table: `fields` (or `{}`), plus `new`. Add methods and defaults to it at any time.
+
+```lua
+local SpecialCat = luaaa:extend(Cat, { tricks = 0 })
+function SpecialCat:learn() self.tricks = self.tricks + 1 end
+
+local a = SpecialCat:new("Felix")     -- every call makes a NEW instance...
+local b = SpecialCat:new("Tom")       -- ...with its own C++ Cat
+a:learn()                             -- a.tricks == 1, b.tricks == 0, SpecialCat.tricks == 0
+
+local ShowCat = luaaa:extend(SpecialCat, { ribbons = 0 })   -- extended classes can be extended
+```
+
+* **Lookup order** on an instance: its own fields → the class table (and the classes it extends, nearest first) → the C++ class's methods and properties → the C++ class's custom `__index`.
+* **Writing** `obj.key = v` calls the C++ setter if `key` is a property; otherwise it sets a field on that instance only.
+* An instance can be passed wherever C++ expects the bound class by reference (`void groom(Cat&)`); `luaaa:base(obj)` returns the underlying C++ object, e.g. to call the method you overrode.
+* Metamethods bound on the C++ class (`__tostring`, `__eq`, …) apply to instances. The instance metatable is derived from the C++ class's the first time a class is instantiated, so finish binding the C++ class before scripts start creating instances.
+* The C++ object lives exactly as long as the instance table that holds it.
 
 ## Multiple `lua_State`s
 
@@ -265,6 +315,7 @@ Define these **before** including `luaaa.hpp`.
 | `LUAAA_FEATURE_PROPERTY` | `1` | Enable `get`/`set` properties (the `__index`/`__newindex` machinery). |
 | `LUAAA_FEATURE_EXTEND` | `1` | Auto-inject `luaaa:extend` / `luaaa:base` for Lua-side inheritance. |
 | `LUAAA_CHECK_CONSTRUCTOR_NAME_CONFLICT` | `1` | Warn when two constructors share a Lua name. |
+| `LUAAA_CHECK_INTEGER_RANGE` | `1` | Raise a Lua error when a number does not fit the C++ integer parameter it is passed to; `0` restores the silent wrap-around. |
 | `LUAAA_DEBUG` | `0` | Enable the `LUAAA_DUMP(L)` stack-dump helper. |
 
 ## String lifetime: `const char*` vs `std::string`
@@ -309,6 +360,8 @@ Who calls the destructor depends on how the object entered Lua:
 | returned as `T*` or `T&` from a bound function | typed **non-owning alias** (full userdata, class metatable, `dtor=nullptr`); Lua never destroys it |
 | returned as `T` (by value) from a bound function | typed **owning copy**; `~T()` runs on GC |
 
+An object is finalized **at most once**. `__gc` is reachable from scripts (`obj:__gc()`); calling it runs the destructor/deleter right away, the collector's later call is then a no-op, and any further use of that object raises `invalid user data` instead of touching a destroyed object. A custom deleter is stored in the object itself, so it stays callable even if the class table (and its constructors) has been collected first.
+
 A returned `T*`/`T&` wraps a full userdata carrying the class metatable, so methods stay callable on it and the value is type-checked when passed back in (a wrong class is rejected, unlike the old untyped lightuserdata). It aliases the C++ object — keep that object alive yourself; a `nullptr` becomes Lua `nil`. A by-value `T` return instead copy-constructs into the userdata and is collected normally. A pointer/reference whose class is *not* bound in that state still degrades to a plain lightuserdata (the legacy opaque-handle pattern); a by-value object of an unbound class raises instead of dangling.
 
 ## Compatibility notes
@@ -319,13 +372,13 @@ A returned `T*`/`T&` wraps a full userdata carrying the class metatable, so meth
 
 ## Troubleshooting / FAQ
 
-**`cpp class 'X' not export`** — luaaa was asked to convert a type it doesn't have bound/specialized. Causes: (1) you called a method before `LuaClass<X>` was constructed in *that* state; (2) the bound signature uses a scalar with no specialization (e.g. an `enum` or a raw struct) — add a `LuaStack` for it; (3) you're using the object in a different `lua_State` than the one it was bound in.
+**`cpp class 'X' not export`** — luaaa was asked to convert a type it doesn't have bound/specialized. Causes: (1) you called a method before `LuaClass<X>` was constructed in *that* state; (2) the bound signature uses a type with no specialization (e.g. a raw struct that was never bound) — bind it, or add a `LuaStack` for it; (3) you're using the object in a different `lua_State` than the one it was bound in.
 
-**`C++ class '...' bind to conflict lua name`** — you bound the same C++ type under two names in one state. Use one name per state, separate states, or distinct wrapper types (see [Multiple states](#multiple-lua_states--the-tag-parameter)).
+**`C++ class '...' bind to conflict lua name`** — you bound the same C++ type under two names in one state. Use one name per state, separate states, or distinct wrapper types (see [Multiple states](#multiple-lua_states)).
 
 **`lua name '...' already bound to a different cpp class`** — the reverse conflict: two *different* C++ types tried to share one lua name in one state. They would have silently shared a metatable (and passed each other's type checks), so luaaa rejects the second bind. Give each type its own name.
 
-**A static method call `Class.method()` fails with "nil value"** — static/free functions bound via `fun` are invoked like methods: call `instance:method(args)`. The instance is the skipped `self`.
+**A static method call `Class.method()` fails with "nil value"** — static/free functions bound via `LuaClass::fun` are invoked like methods: call `instance:method(args)`. The instance is the skipped `self`. To get a true `Class.method()` (or a constant such as `Class.MAX`), put it on the class table with a module of the same name: `LuaModule(L, "Cat").fun("count", &Cat::count).def("MAX", 9);` — `Cat.count()` then works next to `Cat.new()`, in either binding order.
 
 **`attempt to read Write-Only` / `write Read-Only property`** — the property has only a setter (write-only) or only a getter (read-only). Register the missing accessor if you need both.
 

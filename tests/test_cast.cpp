@@ -184,12 +184,13 @@ int main() {
         check(std::isnan((float)nv), "float get NaN 透传 (文档化: 不触发溢出检查)");
     }
 
-    // ===== 浮点 get: +inf (inf > FLT_MAX 应触发报错) =====
+    // ===== 浮点 get: +inf 透传 (第九轮 R9-1 起: 无穷大不算溢出) =====
+    // 原先这里断言「float get +inf 应报错 (inf > FLT_MAX)」。
     printf("[浮点 get +inf 处理]\n");
     {
-        bool r = raises(L, "c.f(math.huge)");
-        printf("    (信息) echo_f(+inf) raises=%d (期望 true: inf>FLT_MAX)\n", (int)r);
-        check(r, "float get +inf 应报错 (inf > FLT_MAX)");
+        bool r = raises(L, "assert(c.f(math.huge) == math.huge)");
+        printf("    (信息) echo_f(+inf) raises=%d (期望 false: inf 透传)\n", (int)r);
+        check(!r, "float get +inf 透传 (不再报错)");
     }
 
     // ===== 浮点 get: 近 FLT_MAX 边界 (3.4e38 应正常, 不误报) =====

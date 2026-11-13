@@ -223,6 +223,8 @@ felix:learn()
 felix:meow("Felix")
 ```
 
+每次 `SpecialCat:new(...)` 都会创建一个独立的实例，各自拥有自己的 C++ `Cat`；扩展出来的类还可以继续扩展。详见 [Lua 侧继承详解](GUIDE.zh-CN.md#lua-侧继承详解)。
+
 ## 把 Lua 函数当作 C++ 回调
 
 C++ 函数可以直接接收 Lua 端传过来的函数作为回调。把对应参数的类型声明为 `std::function`（推荐）或者普通的函数指针即可：

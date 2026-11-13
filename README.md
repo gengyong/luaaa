@@ -223,6 +223,8 @@ felix:learn()
 felix:meow("Felix")
 ```
 
+Every `SpecialCat:new(...)` creates a separate instance with its own C++ `Cat`, and an extended class can be extended again. Details: [Lua-side inheritance in depth](GUIDE.md#lua-side-inheritance-in-depth).
+
 ## Lua functions as C++ callbacks
 
 A C++ function can accept a Lua function. Just declare the parameter as a `std::function` (preferred) or a plain function pointer:

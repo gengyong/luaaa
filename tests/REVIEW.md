@@ -5,6 +5,8 @@
 - 方法：C++ 侧完成绑定 + Lua 侧断言，覆盖正常功能；再用受控输入触发疑似缺陷路径；全程 ASan/UBSan 监控。
 - 测试资产：`tests/test_functional.cpp`（24 项功能断言）、`tests/test_bugs.cpp`（缺陷触发）、`tests/test_edge.cpp`（多 state / 继承）、`tests/run.sh`（一键运行）。
 
+> 以上是第一次报告时的状态。此后经过九轮修复，`luaaa.hpp` 现为 4879 行，测试矩阵为 LuaJIT / 5.4 / 5.5 × ASan+UBSan 共 1356 项。尚未处理的问题见[遗留问题与改进建议](#遗留问题与改进建议截至第九轮未处理)；文末的「总体结论」「缺陷清单」是第一次报告的原文，其中各项均已修复。
+
 ## 修复记录（本轮已修 + 回归验证）
 
 | 缺陷 | 修复内容 | 位置 | 验证 |
@@ -63,6 +65,123 @@
 - 函数指针回调 H2 是 C++ 语言限制，无依赖前提下无法根治 —— 引导用 `std::function`。
 - 回调内 `pcall` 失败仍经 `lua_error` longjmp（可能跳过调用者 C++ 析构）；彻底解决需 C++ 异常桥接，但 embedded 为 `-fno-exceptions`，超出范围。
 - `std::function` 回调不应在其 `lua_State` 关闭后再销毁（`shared_ptr` 析构会 `luaL_unref(L,...)`）。
+
+### 第七轮（高危 4 项：`__gc` 幂等 / deleter 生命周期 / 回调保护调用 / 回调主线程）
+
+| 缺陷 | 修复内容 | 位置 | 验证 |
+|---|---|---|---|
+| **R7-1** 脚本可调 `obj:__gc()`，析构后不置空 → GC 时二次析构；对外来 userdata 调 `__gc` 会被当成 `UserDataDetail` 解释 | `f__objgc` 只信任「full userdata 且 metatable 带本类型 tag（`&s_typeKey`）」的对象；终结后清空 `dtor`/`obj`，最多终结一次；已终结对象经 `LuaStack::get` 报 `invalid user data` | `luaaa.hpp` `LuaClass` 构造函数内 `f__objgc` | `test_review7` H1：手动 `__gc` + GC 后 ctor=dtor=1；已终结对象调方法报错；用户 `__gc` 只跑一次；`getmetatable(o).__gc(io.stdout)` 被忽略 |
+| **R7-2** `ctor(name, spawner, deleter)` 的对象只存了指向 deleter holder userdata 的指针，holder 仅由构造闭包保活 → `Class = nil` 后对象回收时 heap-use-after-free | `UserDataDetail::free_func` 由 `void*` 改为泛型函数指针 `void(*)()`，deleter **按值**存入对象（`reinterpret_cast` 往返）；`LuaModule::def` 的 deleter 路径同步，不再做函数指针↔`void*` 转换 | `luaaa.hpp` `UserDataDetail`、三参 `ctor`、`LuaModule::def` | `test_review7` H2：类表先回收后对象再回收，deleter 恰好一次，ASan 无报错（修复前实测 UAF） |
+| **R7-3** 回调内 `LuaStack<RET>::get` / `LuaStack<ARGS>::put` 失败时直接 `luaL_error`：跨 C++ 栈帧 longjmp，纯 C++ 调用时 PANIC/abort | 新增 `luaaa_detail::CallbackRunner` + `RunProtected`：取函数、压实参、调用、取返回值**全部**在一次保护调用内完成（5.1/LuaJIT 用 `lua_cpcall`，5.2+ 用 `lua_pcall`）；失败返回 `RET()`，栈保持平衡。四处回调实现（函数指针 RET/void、`std::function` RET/void）统一走该路径 | `luaaa.hpp` `luaaa_detail`（callback plumbing）、`IMPLEMENT_CALLBACK_INVOKER`、两处 `LuaStack<std::function<...>>` | `test_review7` H3：返回类型不符 / 实参无法转换均不 panic、返回默认值、连续 50 次失败后栈平衡；正常回调回归通过 |
+| **R7-4** 回调捕获的是注册时的 `lua_State*`，在协程里注册、协程被回收后即悬垂 | 新增 `luaaa_detail::MainThread`：5.2+ 取 `LUA_RIDX_MAINTHREAD`；5.1/LuaJIT 在绑定 `LuaClass`/`LuaModule` 时记录主线程。回调与 `luaL_unref` 都改用主线程 state | `luaaa.hpp` `luaaa_detail::MainThread`、`LuaClass`/`LuaModule` 构造函数 | `test_review7` H4：协程内注册、协程回收后调用，回调运行在主线程（两种回调形式） |
+
+回归：`bash tests/run.sh all` —— LuaJIT / 5.4 / 5.5 × ASan+UBSan 共 978 通过、0 失败（原 909 + `test_review7` 23×3），无 sanitizer 报告；TSan 并发 3/3；C++11/14/17/20/23 下 `-Wall -Wextra -Wpedantic -Wshadow` 零警告；`example`（full）与 `embedded`（no-stdlib、`-fno-exceptions -fno-rtti`，含 LuaJIT 5.1 路径）编译运行通过。
+
+**本轮未处理（已在第八轮修复，见下）**：`T&`/`const T&` 返回实际为拷贝而非别名（`put_ref` 的 `remove_cv` 漏 `::type`）；`luaaa:extend` 所有实例共用同一张表；与类同名的 `LuaModule` 覆盖类 metatable；顺序容器用 `lua_next` 读表（顺序不保证、混入哈希键）；整数入参无范围检查；数字键被原地转成字符串；参数转换失败时 longjmp 跳过实参析构；在 `catch` 块内 `luaL_error` 导致异常对象残留。
+
+### 第八轮（中危 8 项）
+
+| 缺陷 | 修复内容 | 验证（`test_review8`） |
+|---|---|---|
+| **R8-1** `T&`/`const T&` 返回实为拷贝 | `put_ref` 补 `::type`，并改用主模板标记 `LUAAA_BOUND_CLASS_STACK` 判定（避免 `const bool&` 被当指针）；C++14 tuple 路径按元素类型 put（拥有拷贝）。回调的类引用实参随之成为别名 | M1 |
+| **R8-2** `luaaa:extend` 所有实例同表、不支持多级 | 每次 `new` 新建实例表 `{["@"]=obj}`，实例 metatable 为 C++ 类 metatable 的按类副本（`__index` 先查类表链再回落 C++）；类表间以 `__index` 链接；`LuaStack<T>::get` 对表改查类型 tag | M2 |
+| **R8-3** 同名 `LuaModule` 覆盖类 metatable | 模块 metatable 改为每 state 一张共享表，以私有地址为 registry 键，不再用模块名 | M3 |
+| **R8-4** 顺序容器/集合用 `lua_next` | 改为 `t[1..]` 读到首个 nil；vector 预留容量 | M4 |
+| **R8-5** 整数入参无范围检查 | 窄于 `lua_Integer` 的类型越界报 `number overflow`；等宽无符号仍按位接受负值；`LUAAA_CHECK_INTEGER_RANGE=0` 可恢复回绕。这取代了 `test_numeric_edge2` B7 中「经用户确认保持现状」的旧决定（用户于 2026-11-13 确认默认开启），该测试已改为断言新默认行为，旧行为由 `test_features_no_intrange` 覆盖 | M5 |
+| **R8-6** 数字键被原地转成字符串 | 类/模块的 `__index`/`__newindex` 不再转换键；数字键原样交给用户处理器或原样存储；模块表非字符串键赋值不再被丢弃 | M6 |
+| **R8-7** 转换失败 longjmp 跳过实参析构 | 调用边界内的转换失败改为抛 `ConversionError`，栈展开后在边界处重放原生 `luaL_*` 检查；边界以 upvalue 1 的地址自我标识，边界之外（裸 `lua_CFunction`、属性访问器、回调返回值）仍直接抛 lua 错误 | M7 |
+| **R8-8** `catch` 块内 `luaL_error` 致异常残留 | 统一为 `LUAAA_TRY`/`LUAAA_CATCH`：在 catch 内只压入消息，离开处理块后再 `lua_error` | M8 |
+
+顺带修复：`installExtendHelper` 中 `lua_rawgetp` 返回值的用法（5.2 上返回 void）；5.1 路径各 `ctor` 注册后 `luaL_openlib` 的栈残留；`tests/run.sh` 失败数解析的贪婪匹配（"10 failed" 被读成 0）。
+
+回归：`bash tests/run.sh all` —— LuaJIT / 5.4 / 5.5 × ASan+UBSan 共 1209 通过、0 失败，无 sanitizer 报告；C++14（tuple 快路径）与 C++20/LuaJIT 全套通过；TSan 3/3；示例与嵌入式（无标准库、`-fno-exceptions`）构建运行正常。调用开销：成员/自由函数每次调用约增加 1–5 ns（边界登记一次 thread-local 写），`vector` 入参约快 15%。
+
+### 第九轮（第一批低危：R9-1 / R9-5 / R9-10 / R9-11、`enum`、内部宏、`.gitignore`）
+
+编号 R9-x 见下文「遗留问题与改进建议」。
+
+| 项 | 修复内容 | 验证（`test_review9`） |
+|---|---|---|
+| R9-1：`math.huge` 传给浮点参数报溢出 | 浮点 `get` / `put` 的范围检查放行 ±inf，只拦「有限但超出目标类型范围」的值（`1e300` → `float` 仍报溢出）。C++ 返回的 inf 现在得到 `math.huge` | L1 |
+| R9-5：构造函数缺参报 `got userdata` | 新增 `PadMissingArgs<ARGS...>`：在压入对象的 userdata 之前，把缺少的实参位置补成 nil（`lua_State*` 形参不占位）。四种构造形式（placement、spawner、spawner + deleter、spawner + `nullptr`）都走这一步；报错变为 `number expected, got nil`，参数序号正确 | L5 |
+| R9-10：`T*` 参数报错里是 mangled 名 | 类已绑定时报 `<lua 类名> expected, got <实参类型>`，并使用实参的真实序号（原先固定报 `#1`）；未绑定的指针类型仍退回 `cpp pointer ... expected` | L10 |
+| R9-11：拼写 | 16 处 `faild to alloc mem` 改为 `failed to allocate memory`（只在分配失败时出现，没有对应测试） | — |
+| `enum` / `enum class` | 新增 `LuaStack` 偏特化：按 `std::underlying_type` 转换，沿用底层整数类型的类型检查和范围检查；用户自己写的 `LuaStack<MyEnum>` 全特化仍然优先 | ENUM |
+| 内部宏泄漏 | `USE_NEW_MODULE_REGISTRY`、`RTTI_CLASS_NAME`、`IMPLEMENT_CALLBACK_INVOKER`、`IMPLEMENT_FUNCTION_CALLER`、`luaaa_check_constructor_name_conflict`、`_NOTHING` 全部加 `LUAAA_` 前缀（最后两个分别改名为 `LUAAA_REPORT_CTOR_NAME_CONFLICT`、`LUAAA_NOTHING`），并在文件末尾 `#undef`；公开的配置宏不受影响 | MACRO |
+| `tests/results.txt` | 加入 `.gitignore` | — |
+
+**随之改动的旧断言**（都是把旧行为写成预期的测试，没有「经用户确认」的记录）：
+
+- `test_cast`、`test_float_edge`：原断言「`float` get +inf 应报溢出」，改为断言 ±inf 透传。
+- `test_numeric`：`big_ld()` 原为 `1e300L * 1e300L`。在 `long double` 与 `double` 等宽的平台（arm64、MSVC）上它其实就是 +inf，靠「inf 也算溢出」才通过。改为返回 `long double` 的最大有限值，并按平台分支：`long double` 更宽时断言报溢出，等宽时断言可以原样返回。
+
+`tests/run.sh` 的汇总行只认 `=== name: N passed, M failed ===` 这一种格式，新测试的输出已按此对齐（写成四个等号时不会计入总数）。
+
+回归：`bash tests/run.sh all` —— LuaJIT / 5.4 / 5.5 × ASan+UBSan 共 1356 通过、0 失败（原 1209 + `test_review9` 48×3 + `test_float_edge` 新增 1×3），无 sanitizer 报告；TSan 3/3；C++14 / 5.5 与 C++20 / LuaJIT 各 452 通过；示例与嵌入式（无标准库、`-fno-exceptions -fno-rtti`）在 5.5 和 LuaJIT 下构建运行正常；带标准库的 `-fno-exceptions` 构建通过；C++11/17/23 下 `-Wall -Wextra -Wpedantic -Wshadow` 零警告。
+
+## 遗留问题与改进建议（截至第九轮，未处理）
+
+第七、八轮修了审阅中的高危 4 项和中危 8 项，第九轮修了下面标为「已修复」的第一批低危项。其余条目按「现象 → 建议」记录，供后续排期。
+
+- 「遗留低危项」一节的现象于 2026-11-13 在当前代码上用探针重新实测过（Lua 5.5，arm64，ASan+UBSan）。
+- 「改进建议」中标注「未复核」的条目来自最初的代码阅读，没有单独写探针验证。
+- 编号用 `R9-` 前缀，与本文件后面第一次报告里的 L1–L3 无关。
+
+### 遗留低危项
+
+| 编号 | 现象（实测） | 位置 | 建议 |
+|---|---|---|---|
+| ~~**R9-1**~~ **已修复（第九轮）** `math.huge` 传给浮点参数报溢出，NaN 却通过 | `dbl(math.huge)`、`dbl(-math.huge)` 报 `number overflow: value does not fit target floating type`；`dbl(0/0)` 正常返回 `nan` | 浮点 `LuaStack::get` 的范围比较 | 无穷大是合法的 `double`/`float` 值：比较前先用 `std::isinf` 放行，只拦「有限但超出目标类型范围」的值（如 `1e300` → `float`） |
+| **R9-2** `uint64` 出参在 2⁶³ 附近不一致 | 返回 `uint64_t(1) << 63` 得到 `-9223372036854775808`，返回 `UINT64_MAX` 却报 `integer value out of lua_Integer range`；入参 `-1` 被接受为 `UINT64_MAX`，原样返回时报错（往返不对称） | 整数 `LuaStack::put` 的范围检查：用 `long double` 比较，而 arm64 / MSVC 上 `long double` 就是 `double`，`INT64_MAX` 被舍入成 2⁶³ | 整数范围检查改用整数比较（按有无符号分支），不经过浮点。再定一个统一规则：等宽无符号要么两个方向都按位解释，要么两个方向都报错，并同步 GUIDE 里的说明 |
+| **R9-3** nil 不能传给 `T*` 参数 | C++ 返回的 `nullptr` 在 Lua 里是 nil，但 `ptrGet(nil)` 报 `cpp pointer ... expected`，返回值不能原样传回 | `LuaStack<T*>::get` | `T*` 入参接受 nil → `nullptr`。这会让原本报错的调用变成空指针，建议加开关宏（如 `LUAAA_NIL_AS_NULLPTR`）并在 GUIDE 里提醒被绑函数要判空 |
+| **R9-4** extend 实例不能传给 `T*` 参数 | `luaaa:extend` 的实例可以当 `self`，也可以传给 `T&` / `const T&` 参数，但传给 `T*` 参数报错，必须写 `luaaa:base(d)` | `LuaStack<T*>::get` 没有主模板 `get` 的表分支 | `T*` 的 `get` 同样识别带类型 tag 的实例表，取其 `"@"` |
+| ~~**R9-5**~~ **已修复（第九轮）** 构造函数缺参的报错信息误导 | `Cat.new()` 报 `bad argument #1 (number expected, got userdata)`；双参构造少传一个报 `#2 ... got userdata` | placement 构造：对象的 userdata 先于取参入栈，缺失的参数位读到了它 | 取参前用 `lua_gettop` 校验参数个数，或取完参数再压 userdata，使报错为 `got no value` |
+| **R9-6** Lua 回调出错被静默吞掉 | 回调里 `error('cb boom')`，C++ 侧拿到 `RET()`（如 0），没有任何提示；只有 `LUAAA_DEBUG=1` 时打印到 stderr | `HandleCallbackError` | 提供可注册的错误钩子（按 state 存 registry），默认行为不变；钩子里可记日志或转成 C++ 异常 |
+| **R9-7** `LuaModule(L)` 改动 `_G` | 绑定默认模块后 `_G` 被挂上 metatable，且多出全局 `__name = "_G"`；此后每次读写未定义全局都要走一次 C 函数 | `LuaModule` 构造函数、`_ensureMetaTable` | 只在该模块第一次注册 property 时才挂 metatable；模块名放进 registry 或 metatable，不写进模块表 |
+| **R9-8** 类 metatable 对脚本完全开放 | `o.__gc` 能取到（调用已安全，见 R7-1）；`getmetatable(o)` 返回真表，脚本可以改写方法（实测 `mt.get = ...` 后 `o:get()` 返回新值）；同理应能改掉 `__gc`、`__index`（未实测） | 方法直接存在 metatable 里，未设 `__metatable` | 方法放进独立的方法表，`__index` 指向它；metatable 设 `__metatable` 字段。注意 extend 的实例 metatable 是从类 metatable 拷贝的，要一起调整 |
+| **R9-9** 字符串在 NUL 处截断（双向） | Lua 的 `"a\0b"` 传给 `std::string` 参数长度为 1；C++ 返回长度 3 的 `std::string("a\0b", 3)`，Lua 侧 `#s` 为 1 | `LuaStack<std::string>` 经 `const char*` 转换（`c_str()` + `lua_pushstring` / `lua_tostring`） | `std::string` 改用 `lua_tolstring` / `lua_pushlstring`。`tests/test_strings.cpp` 把截断断言为「既定限制」，修的时候要同时改那几条断言 |
+| ~~**R9-10**~~ **已修复（第九轮，仅 `T*` 参数的报错）** 报错里的 C++ 类型名不可读 | `cpp pointer 'P3Cat' expected`（mangled 名）；关闭 RTTI 时是 `?` | `RTTI_CLASS_NAME` | 类已绑定时用它在当前 state 的 lua 名，未绑定时再退回 RTTI 名 |
+| ~~**R9-11**~~ **已修复（第九轮）** 拼写 | 内存分配失败的报错写成 `faild to alloc mem`（全文件 16 处 `faild`） | `ctor` / `fun` / `def` 注册路径 | 改为 `failed to allocate memory` |
+
+### 改进建议
+
+**功能缺口**
+
+| 建议 | 现状 | 备注 |
+|---|---|---|
+| C++ 继承 | 实测：`Dog : Animal` 两个类都绑定后，`Dog` 实例传给 `const Animal&` 报 `Animal expected, got Dog`，也调不到 `Animal` 的方法 | 需要在绑定时声明基类（如 `LuaClass<Dog>(L, "Dog").inherit<Animal>()`），`get` 沿基类链做指针转换，`__index` 链到基类方法表。工作量最大的一项 |
+| ~~`enum` / `enum class`~~ **已支持（第九轮）** | 原先能编译，但被当成未绑定的类，调用时报 `cpp class '5Color' not export` | 已按 `std::underlying_type` 加偏特化 |
+| 智能指针 | 不支持 `std::shared_ptr<T>` / `std::unique_ptr<T>` 作参数或返回值 | userdata 里存智能指针本体，`__gc` 调其析构；与现有 `UserDataDetail` 的所有权标记合并设计 |
+| 只能移动的返回类型 | 实测：返回拷贝构造被删除的已绑定类编译失败（`LuaStack<T>::put` 调用了拷贝构造）；`LuaStackReturn(lua_State*, T t)` 也是按值接收 | `put` 增加右值重载，返回路径用转发引用 + `std::move` |
+| C++17 类型 | 没有 `std::optional`（nil ↔ `nullopt`）、`std::string_view` | 用 `__cplusplus` 条件编译；`optional` 也能顺带解决 R9-3 的部分需求 |
+| 重载分发 | 同名重载必须用不同 lua 名注册 | 可按参数个数和类型在运行时挑选，属于可选增强 |
+| 类表上的静态函数与常量 | 第八轮后可用 `LuaModule(L, "Cat")` 挂到类表上 | 可以加语法糖 `LuaClass::staticFun` / `LuaClass::constant`，省去再构造一个模块 |
+| 嵌套模块名与 `require` | 5.1 路径（`luaL_openlib`）与 5.2+ 路径（`USE_NEW_MODULE_REGISTRY`）对 `"a.b"` 这类名字和 `package.loaded` 的处理不一致（未复核） | 统一成显式建表，并可选写入 `package.loaded` |
+
+**性能**（基线：`-O2`、Lua 5.5、arm64，成员方法约 64 ns/次，自由函数约 16 ns/次）
+
+- `klassName(L)` 每次都查一次 registry，全文件 42 处调用，一次带 `self` 的方法调用要查 2–4 次。同一函数内缓存到局部变量，或直接比较 metatable 上的类型 tag，不取名字。
+- 每次方法调用都经过 C 实现的 `__index`（为了 property）。没有注册任何 property 的类可以直接用表做 `__index`，省掉一次 C 调用。成员方法比自由函数慢的部分有多少来自这里还没有单独测过，动手前先做一次剖析。
+
+**工程**
+
+- **没有 CI。** 建议 GitHub Actions 跑 gcc / clang / MSVC × LuaJIT / PUC 5.1–5.5。MSVC 的调用约定分支（`__cdecl` / `__stdcall` / `__fastcall` 等）和 PUC Lua 5.1 / 5.2 / 5.3 至今从未实测，其中 5.2 上曾有编译不过的写法（第八轮顺带修了一处）。
+- **测试矩阵只覆盖 `-std=c++11`。** C++14 的 tuple 快路径和 C++20 目前靠手工加 `STD=` 跑。`tests/run.sh all` 应把 C++ 标准也纳入矩阵。
+- **`tests/run.sh` 写死了 `/opt/homebrew`**（Lua 5.4 的 pkg-config 路径和回退的 include / lib 路径），Linux 和 Intel Mac 上探测不到 5.4。
+- ~~**`tests/results.txt` 是运行产物但未加入 `.gitignore`**~~ 已加入（第九轮）。
+- **部分测试把已知的错误行为断言为「既定限制」**（如 `test_strings` 的 NUL 截断）。这类断言应单独标记，修复对应问题时好找。
+- ~~**宏命名。** 内部宏没有 `LUAAA_` 前缀、不 `#undef`，`_NOTHING` 是保留标识符。~~ 已修复（第九轮）。
+- **全局命名空间的 polyfill。** 5.1 下的 `luaL_setfuncs`、`luaL_setmetatable`、`lua_rawgetp`、`lua_rawsetp` 定义在全局，和其他同样做兼容的库（如 lua-compat-5.3）一起用会重定义。改名为 `LUAAA_` 前缀的内部函数。
+- **重复代码。** 约 15 个近乎相同的 `Invoke` 辅助结构和 13 个容器特化可以各自合并成通用模板，头文件（现 4879 行）能明显缩短，也能避免像第八轮那样同一个修复要改 8 处。
+- **关闭 property 时有 12 条 `unused-parameter` 警告**（`LUAAA_FEATURE_PROPERTY=0` 且 `-Wextra`），默认配置下零警告。
+- **版本与变更说明。** 第七、八轮含行为变化（引用返回变别名、extend 实例模型、容器按 ipairs 语义读取、整数范围检查默认开启），版本号还没有升，也没有 CHANGELOG；建议升版本时把这些列为不兼容变更。
+
+### 建议的处理顺序
+
+1. ~~改动小、收益直接的：R9-1、R9-5、R9-10、R9-11、`enum`、`.gitignore`、宏前缀与 `#undef`。~~ 已在第九轮完成。
+2. 需要定规则或加开关的：R9-2、R9-3、R9-4、R9-9、R9-6（错误钩子）。
+3. 结构性改动，建议各自单独一轮：R9-8（独立方法表，可与「表 `__index`」的性能项一起做）、R9-7、C++ 继承、智能指针、合并重复模板。
+4. CI 最好在第 3 步之前建好，否则 MSVC 和旧版 Lua 上的回归没有东西兜底。
 
 ## 总体结论
 

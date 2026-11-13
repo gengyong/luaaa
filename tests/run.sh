@@ -107,6 +107,7 @@ ALL_TESTS=(
   "tests/test_features_no_property.cpp|1|0"
   "tests/test_features_no_extend.cpp|1|0"
   "tests/test_features_no_conflict.cpp|1|0"
+  "tests/test_features_no_intrange.cpp|1|0"
   "tests/test_overload.cpp|1|0"
   "tests/test_metamethod.cpp|1|0"
   "tests/test_float_edge.cpp|1|0"
@@ -119,6 +120,9 @@ ALL_TESTS=(
   "tests/test_gc_except.cpp|1|0"
   "tests/test_numeric_edge2.cpp|1|0"
   "tests/test_review3.cpp|1|0"
+  "tests/test_review7.cpp|1|0"
+  "tests/test_review8.cpp|1|0"
+  "tests/test_review9.cpp|1|0"
   "tests/test_concurrency.cpp|1|1"
 )
 
@@ -188,7 +192,7 @@ for target in "${SELECTED[@]}"; do
     summary="$(parse_summary "$tmpout")"
     if [ -n "$summary" ]; then
       p="$(echo "$summary" | sed -nE 's/.*: ([0-9]+) passed.*/\1/p')"
-      f="$(echo "$summary" | sed -nE 's/.*([0-9]+) failed ===/\1/p')"
+      f="$(echo "$summary" | sed -nE 's/.*[^0-9]([0-9]+) failed ===/\1/p')"
       TOTAL_PASS=$((TOTAL_PASS + ${p:-0}))
       TOTAL_FAIL=$((TOTAL_FAIL + ${f:-0}))
       [ "${f:-0}" -gt 0 ] && FAIL_RECORDS="$FAIL_RECORDS $lua_name:$(basename "$src")"
