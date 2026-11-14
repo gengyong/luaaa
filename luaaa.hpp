@@ -108,6 +108,15 @@ inline void LUAAA_pushglobaltable(lua_State * L) {
 #endif
 }
 
+// Keeps a function out of line (see the ArgPack call helpers).
+#if defined(_MSC_VER)
+#   define LUAAA_NOINLINE __declspec(noinline)
+#elif defined(__GNUC__) || defined(__clang__)
+#   define LUAAA_NOINLINE __attribute__((noinline))
+#else
+#   define LUAAA_NOINLINE
+#endif
+
 // The language level, also where MSVC keeps __cplusplus at 199711.
 #if defined(_MSVC_LANG) && _MSVC_LANG > __cplusplus
 #   define LUAAA_CPLUSPLUS _MSVC_LANG
@@ -191,9 +200,23 @@ inline void LUAAA_pushglobaltable(lua_State * L) {
 // noticed), and defining identically-named polyfills would collide with
 // LuaJIT's declarations -- route through these wrappers instead. Before 5.3
 // (no integer subtype: every number is a double) the integer wrapper clamps
-// to lua_Integer's range (like LuaJIT does) instead of relying on the
+// to LUAAA_Integer's range (like LuaJIT does) instead of relying on the
 // double->integer cast, which is undefined for a value out of range -- and
 // PUC 5.2's own lua_tointegerx does exactly that cast.
+//
+// LUAAA_Integer is the integer every lua number converts through. From 5.3 on
+// it is lua_Integer, the integer subtype. Before 5.3 lua_Integer is only
+// ptrdiff_t -- 32 bits on a 32-bit target -- while the double can hold integers
+// up to 2^53, so converting through it clamped every value beyond 2^31 (an
+// int64_t argument of 2^40 arrived as 2147483647). There it is long long, and
+// integers are pushed as numbers.
+#if !defined LUA_VERSION_NUM || LUA_VERSION_NUM < 503
+typedef long long LUAAA_Integer;
+inline void LUAAA_pushinteger(lua_State * L, LUAAA_Integer v) { lua_pushnumber(L, (lua_Number)v); }
+#else
+typedef lua_Integer LUAAA_Integer;
+inline void LUAAA_pushinteger(lua_State * L, LUAAA_Integer v) { lua_pushinteger(L, v); }
+#endif
 inline lua_Number LUAAA_tonumberx(lua_State * L, int idx, int * isnum) {
 #if !defined LUA_VERSION_NUM || LUA_VERSION_NUM <= 501
     const lua_Number r = lua_tonumber(L, idx);
@@ -204,15 +227,15 @@ inline lua_Number LUAAA_tonumberx(lua_State * L, int idx, int * isnum) {
 #endif
 }
 
-inline lua_Integer LUAAA_tointegerx(lua_State * L, int idx, int * isnum) {
+inline LUAAA_Integer LUAAA_tointegerx(lua_State * L, int idx, int * isnum) {
 #if !defined LUA_VERSION_NUM || LUA_VERSION_NUM < 503
     const lua_Number n = LUAAA_tonumberx(L, idx, isnum);
-    const lua_Number hi = (lua_Number)(std::numeric_limits<lua_Integer>::max)();
-    const lua_Number lo = (lua_Number)(std::numeric_limits<lua_Integer>::min)();
+    const lua_Number hi = (lua_Number)(std::numeric_limits<LUAAA_Integer>::max)();
+    const lua_Number lo = (lua_Number)(std::numeric_limits<LUAAA_Integer>::min)();
     if (n != n) return 0;                       // NaN: the cast below would be undefined
-    if (n >= hi) return (std::numeric_limits<lua_Integer>::max)();
-    if (n <= lo) return (std::numeric_limits<lua_Integer>::min)();
-    return (lua_Integer)n;
+    if (n >= hi) return (std::numeric_limits<LUAAA_Integer>::max)();
+    if (n <= lo) return (std::numeric_limits<LUAAA_Integer>::min)();
+    return (LUAAA_Integer)n;
 #else
     return lua_tointegerx(L, idx, isnum);
 #endif
@@ -703,7 +726,7 @@ namespace LUAAA_NS
 // `key` is the address held in the running closure's upvalue 1 (what its caller
 // already fetched as the callee holder). The block may `return`; nothing may
 // follow LUAAA_BOUNDARY_CATCH.
-//     LUAAA_BOUNDARY_TRY(key) { ArgPack<...> args(L, base); return f(ArgAt<Ks>::get(args)...); } LUAAA_BOUNDARY_CATCH(L, "function call")
+//     LUAAA_BOUNDARY_TRY(key) { return CallWithArgs<...>(L, f, base, ...); } LUAAA_BOUNDARY_CATCH(L, "function call")
 #if LUAAA_HAS_EXCEPTIONS
 #   define LUAAA_BOUNDARY_TRY(key) \
         ::LUAAA_NS::luaaa_detail::ConversionError luaaa_failure = { ::LUAAA_NS::luaaa_detail::CONV_NONE, 0, 0, nullptr }; \
@@ -1254,7 +1277,7 @@ namespace LUAAA_NS
     // excluded so the explicit `int` specialization and the `const T` / `T&`
     // forwarders keep priority.
     //
-    // Precision note: a value outside lua_Integer's range -- e.g. a large
+    // Precision note: a value outside LUAAA_Integer's range -- e.g. a large
     // unsigned 64-bit value, or ANY 64-bit value on Lua 5.1/5.2/LuaJIT where
     // numbers are doubles -- is truncated/rounded. That is an inherent Lua
     // limitation, not something this converter can avoid.
@@ -1265,22 +1288,22 @@ namespace LUAAA_NS
     //   the conversion succeeded, so we no longer rely on the loose lua_isstring()
     //   check that admitted any string.
     // put: symmetric with the floating-point specialization -- a value that does
-    //   not fit lua_Integer's range raises luaL_error instead of being silently
+    //   not fit LUAAA_Integer's range raises luaL_error instead of being silently
     //   narrowed (wrapping). Values Lua's number type cannot represent exactly
     //   (e.g. 64-bit ints when lua_Number is double) remain an inherent Lua limit.
     namespace luaaa_detail {
-        // Does an integer of a type WIDER than lua_Integer fit into it?
+        // Does an integer of a type WIDER than LUAAA_Integer fit into it?
         // (Narrower and equally wide types never get here -- see put below.)
         template<typename T>
         inline bool fits_wide(T v, std::true_type /*signed*/)
         {
-            return v >= static_cast<T>((std::numeric_limits<lua_Integer>::min)())
-                && v <= static_cast<T>((std::numeric_limits<lua_Integer>::max)());
+            return v >= static_cast<T>((std::numeric_limits<LUAAA_Integer>::min)())
+                && v <= static_cast<T>((std::numeric_limits<LUAAA_Integer>::max)());
         }
         template<typename T>
         inline bool fits_wide(T v, std::false_type /*unsigned*/)
         {
-            return v <= static_cast<T>((std::numeric_limits<lua_Integer>::max)());
+            return v <= static_cast<T>((std::numeric_limits<LUAAA_Integer>::max)());
         }
         template<typename T>
         inline bool fits_lua_integer(T v, std::true_type /*wider*/)
@@ -1295,7 +1318,7 @@ namespace LUAAA_NS
         template<typename T>
         inline bool fits_lua_integer(T v)
         {
-            return fits_lua_integer(v, std::integral_constant<bool, (sizeof(T) > sizeof(lua_Integer))>());
+            return fits_lua_integer(v, std::integral_constant<bool, (sizeof(T) > sizeof(LUAAA_Integer))>());
         }
     }
 
@@ -1315,7 +1338,7 @@ namespace LUAAA_NS
             if (t == LUA_TNUMBER || (t == LUA_TSTRING && lua_isnumber(L, idx)))
             {
                 int isnum = 0;
-                lua_Integer v = LUAAA_tointegerx(L, idx, &isnum);
+                LUAAA_Integer v = LUAAA_tointegerx(L, idx, &isnum);
                 if (!isnum)
                 {
                     luaaa_detail::conv_error(L, "bad number (not an integer)");
@@ -1323,15 +1346,15 @@ namespace LUAAA_NS
                 // Symmetric with put and with the floating-point get: refuse to
                 // narrow. A value outside T's range used to wrap silently
                 // (300 -> uint8_t 44, 2^40 -> int 0, -1 -> unsigned 4294967295).
-                // Types as wide as lua_Integer need no check; an UNSIGNED type
+                // Types as wide as LUAAA_Integer need no check; an UNSIGNED type
                 // that wide keeps accepting negative values as their bit
                 // pattern -- the only way a script can spell a 64-bit mask
-                // such as 0xFFFFFFFFFFFFFFFF, which is -1 as a lua_Integer.
+                // such as 0xFFFFFFFFFFFFFFFF, which is -1 as a 64-bit LUAAA_Integer.
                 // (LUAAA_CHECK_INTEGER_RANGE=0 restores the silent wrap.)
 #if LUAAA_CHECK_INTEGER_RANGE
-                if (sizeof(T) < sizeof(lua_Integer)
-                    && (v < static_cast<lua_Integer>((std::numeric_limits<T>::min)())
-                        || v > static_cast<lua_Integer>((std::numeric_limits<T>::max)())))
+                if (sizeof(T) < sizeof(LUAAA_Integer)
+                    && (v < static_cast<LUAAA_Integer>((std::numeric_limits<T>::min)())
+                        || v > static_cast<LUAAA_Integer>((std::numeric_limits<T>::max)())))
                 {
                     luaaa_detail::conv_error(L, "number overflow: value does not fit target integer type");
                 }
@@ -1348,12 +1371,12 @@ namespace LUAAA_NS
             // detour through floating point rounds INT64_MAX up to 2^63 where
             // long double is just double -- arm64, MSVC -- which made
             // uint64_t(1) << 63 pass and wrap while UINT64_MAX was refused):
-            //   * a type narrower than lua_Integer, or a signed one as wide,
+            //   * a type narrower than LUAAA_Integer, or a signed one as wide,
             //     always fits;
-            //   * an UNSIGNED type as wide as lua_Integer travels as its bit
+            //   * an UNSIGNED type as wide as LUAAA_Integer travels as its bit
             //     pattern, exactly as get accepts it: UINT64_MAX arrives as
             //     -1 and -1 comes back as UINT64_MAX, so every value round-trips;
-            //   * only a type WIDER than lua_Integer can overflow, and then
+            //   * only a type WIDER than LUAAA_Integer can overflow, and then
             //     raises (LUAAA_CHECK_INTEGER_RANGE=0: wraps silently).
 #if LUAAA_CHECK_INTEGER_RANGE
             if (!luaaa_detail::fits_lua_integer(t))
@@ -1361,7 +1384,7 @@ namespace LUAAA_NS
                 luaL_error(L, "number overflow: integer value out of lua_Integer range");
             }
 #endif
-            lua_pushinteger(L, static_cast<lua_Integer>(t));
+            LUAAA_pushinteger(L, static_cast<LUAAA_Integer>(t));
         }
     };
 
@@ -1908,6 +1931,38 @@ namespace LUAAA_NS
         static typename P::Stored&& get(P& p) { return static_cast<typename P::Stored&&>(p.value); }
     };
 
+    // An ArgPack lives only in these out-of-line helpers, never in the frame of
+    // a call boundary. After a failed conversion the boundary catches the
+    // ConversionError and then raises with lua_error, a longjmp. On x64 Windows
+    // longjmp unwinds every frame it crosses like an exception, and MSVC's
+    // optimised unwind tables may still list an ArgPack of that frame as live
+    // after its scope has ended (seen with /O2: the destructor ran on the
+    // never-constructed member and crashed). In a helper the ArgPack is gone
+    // with the helper's frame before the boundary even catches.
+    template<typename TRET, typename FTYPE, typename... ARGS, std::size_t... Ns, std::size_t... Ks>
+    LUAAA_NOINLINE TRET CallWithArgs(lua_State* state, FTYPE& f, int base, indices<Ns...>, indices<Ks...>)
+    {
+        ArgPack<indices<Ns...>, ARGS...> args(state, base);
+        (void)args;
+        return f(ArgAt<Ks>::get(args)...);
+    }
+
+    template<typename TRET, typename SELF, typename FTYPE, typename... ARGS, std::size_t... Ns, std::size_t... Ks>
+    LUAAA_NOINLINE TRET CallMethodWithArgs(lua_State* state, SELF& self, FTYPE& f, int base, indices<Ns...>, indices<Ks...>)
+    {
+        ArgPack<indices<Ns...>, ARGS...> args(state, base);
+        (void)args;
+        return (self.*f)(ArgAt<Ks>::get(args)...);
+    }
+
+    template<typename TCLASS, typename... ARGS, std::size_t... Ns, std::size_t... Ks>
+    LUAAA_NOINLINE TCLASS* ConstructWithArgs(lua_State* state, void* mem, int base, indices<Ns...>, indices<Ks...>)
+    {
+        ArgPack<indices<Ns...>, ARGS...> args(state, base);
+        (void)args;
+        return new(mem) TCLASS(ArgAt<Ks>::get(args)...);
+    }
+
     // Number of Lua arguments a parameter list consumes (lua_State* takes none).
     template<typename... Args> struct count_lua_args;
     template<> struct count_lua_args<> { enum { value = 0 }; };
@@ -1967,9 +2022,7 @@ namespace LUAAA_NS
         // becomes a lua error at this boundary (see "error plumbing").
         LUAAA_BOUNDARY_TRY(calleePtr)
         {
-            ArgPack<indices<Ns...>, ARGS...> args(state, (int)(1 + skip));
-            (void)args;
-            return (*(FTYPE*)(calleePtr))(ArgAt<Ks>::get(args)...);
+            return CallWithArgs<TRET, FTYPE, ARGS...>(state, *(FTYPE*)(calleePtr), (int)(1 + skip), indices<Ns...>(), indices<Ks...>());
         }
         LUAAA_BOUNDARY_CATCH(state, "function call")
     }
@@ -2054,10 +2107,7 @@ namespace LUAAA_NS
     {
         LUAAA_BOUNDARY_TRY(calleePtr)
         {
-            auto&& self = LuaStack<TCLASS>::get(state, 1);
-            ArgPack<indices<Ns...>, ARGS...> args(state, 2);
-            (void)args;
-            return (self.**(FTYPE*)(calleePtr))(ArgAt<Ks>::get(args)...);
+            return CallMethodWithArgs<TRET, TCLASS, FTYPE, ARGS...>(state, LuaStack<TCLASS>::get(state, 1), *(FTYPE*)(calleePtr), 2, indices<Ns...>(), indices<Ks...>());
         }
         LUAAA_BOUNDARY_CATCH(state, "member function call")
     }
@@ -2180,7 +2230,7 @@ namespace LUAAA_NS
                 return false;
             }
             int isnum = 0;
-            const lua_Integer v = LUAAA_tointegerx(L, idx, &isnum);
+            const LUAAA_Integer v = LUAAA_tointegerx(L, idx, &isnum);
             return isnum && static_cast<lua_Number>(v) == lua_tonumber(L, idx);
         }
 
@@ -2426,9 +2476,7 @@ namespace LUAAA_NS
             // error and the host does not terminate.
             LUAAA_BOUNDARY_TRY(lua_touserdata(state, lua_upvalueindex(1)))
             {
-                ArgPack<indices<Ns...>, ARGS...> args(state, (int)(1 + skip));
-                (void)args;
-                return new(mem) TCLASS(ArgAt<Ks>::get(args)...);
+                return ConstructWithArgs<TCLASS, ARGS...>(state, mem, (int)(1 + skip), indices<Ns...>(), indices<Ks...>());
             }
             LUAAA_BOUNDARY_CATCH(state, "constructor")
         }
@@ -4902,6 +4950,7 @@ namespace LUAAA_NS
 #undef LUAAA_CATCH
 #undef LUAAA_BOUNDARY_TRY
 #undef LUAAA_BOUNDARY_CATCH
+#undef LUAAA_NOINLINE
 #undef LUAAA_IMPLEMENT_CALLBACK_INVOKER
 #undef LUAAA_IMPLEMENT_FUNCTION_CALLER
 #undef LUAAA_REPORT_CTOR_NAME_CONFLICT

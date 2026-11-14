@@ -51,6 +51,8 @@
 * `T*` parameter errors name the Lua class and the real argument position.
 * On LuaJIT, a Lua error raised inside a property accessor or a callback conversion keeps its own message instead of `unknown C++ exception`.
 * A `LuaModule` named like a class no longer clobbers the class metatable; numeric keys are no longer converted to strings by `__index` / `__newindex`.
+* Arguments are converted strictly left to right before the call. On MSVC below C++17, a by-value argument was not destroyed when a later one failed to convert, and on x64 a failed conversion could crash while the Lua error unwound the stack.
+* Lua 5.1 / 5.2 on 32-bit targets: integers convert through `long long` instead of the 32-bit `lua_Integer`, so values beyond 2³¹ are no longer clamped (an `int64_t` argument of 2⁴⁰ used to arrive as 2147483647) and integer range checks follow the same rules as on 64-bit targets.
 
 ### Performance
 
