@@ -703,7 +703,7 @@ namespace LUAAA_NS
 // `key` is the address held in the running closure's upvalue 1 (what its caller
 // already fetched as the callee holder). The block may `return`; nothing may
 // follow LUAAA_BOUNDARY_CATCH.
-//     LUAAA_BOUNDARY_TRY(key) { return f(LuaStack<ARGS>::get(L, i)...); } LUAAA_BOUNDARY_CATCH(L, "function call")
+//     LUAAA_BOUNDARY_TRY(key) { ArgPack<...> args(L, base); return f(ArgAt<Ks>::get(args)...); } LUAAA_BOUNDARY_CATCH(L, "function call")
 #if LUAAA_HAS_EXCEPTIONS
 #   define LUAAA_BOUNDARY_TRY(key) \
         ::LUAAA_NS::luaaa_detail::ConversionError luaaa_failure = { ::LUAAA_NS::luaaa_detail::CONV_NONE, 0, 0, nullptr }; \
@@ -1853,6 +1853,61 @@ namespace LUAAA_NS
     template<typename... Args>
     struct make_arg_indices : make_arg_indices_impl<0, indices<>, Args...> {};
 
+    // The converted arguments of one call, read from the lua stack strictly left
+    // to right BEFORE the callee is invoked.
+    //
+    // Converting inside the call expression -- f(LuaStack<ARGS>::get(L, i)...) --
+    // leaves the order unspecified, and when a later conversion throws
+    // ConversionError the arguments already converted must be destroyed by the
+    // compiler's unwinding code. MSVC below /std:c++17 skips that for placement
+    // new and pointer-to-member calls, leaking a by-value argument. Members of a
+    // class are initialised in declaration order, and the ones already built are
+    // destroyed if a later one throws, on every compiler.
+    //
+    // Each slot holds exactly what LuaStack<A>::get returns (a value or a
+    // reference) and is handed to the callee as an xvalue, so a by-value
+    // parameter is move-constructed from it.
+    template<typename IDX, typename... ARGS>
+    struct ArgPack;
+
+    template<>
+    struct ArgPack<indices<>>
+    {
+        ArgPack(lua_State*, int) {}
+    };
+
+    template<std::size_t N, std::size_t... Ns, typename A, typename... As>
+    struct ArgPack<indices<N, Ns...>, A, As...>
+    {
+        typedef decltype(LuaStack<A>::get((lua_State*)nullptr, 0)) Stored;
+        Stored value;
+        ArgPack<indices<Ns...>, As...> rest;
+
+        ArgPack(lua_State* L, int base)
+            : value(LuaStack<A>::get(L, (int)(N + base)))
+            , rest(L, base)
+        {}
+
+    private:
+        ArgPack(const ArgPack&);
+        ArgPack& operator=(const ArgPack&);
+    };
+
+    // The K-th converted argument of an ArgPack, as an xvalue.
+    template<std::size_t K>
+    struct ArgAt
+    {
+        template<typename P>
+        static auto get(P& p) -> decltype(ArgAt<K - 1>::get(p.rest)) { return ArgAt<K - 1>::get(p.rest); }
+    };
+
+    template<>
+    struct ArgAt<0>
+    {
+        template<typename P>
+        static typename P::Stored&& get(P& p) { return static_cast<typename P::Stored&&>(p.value); }
+    };
+
     // Number of Lua arguments a parameter list consumes (lua_State* takes none).
     template<typename... Args> struct count_lua_args;
     template<> struct count_lua_args<> { enum { value = 0 }; };
@@ -1905,14 +1960,16 @@ namespace LUAAA_NS
         }
     };
 
-    template<typename TRET, typename FTYPE, typename ...ARGS, std::size_t... Ns>
-    TRET LuaInvokeImpl(lua_State* state, void* calleePtr, size_t skip, indices<Ns...>)
+    template<typename TRET, typename FTYPE, typename ...ARGS, std::size_t... Ns, std::size_t... Ks>
+    TRET LuaInvokeImpl(lua_State* state, void* calleePtr, size_t skip, indices<Ns...>, indices<Ks...>)
     {
         // A failing argument conversion or a C++ exception thrown by the call
         // becomes a lua error at this boundary (see "error plumbing").
         LUAAA_BOUNDARY_TRY(calleePtr)
         {
-            return (*(FTYPE*)(calleePtr))(LuaStack<ARGS>::get(state, (int)(Ns + 1 + skip))...);
+            ArgPack<indices<Ns...>, ARGS...> args(state, (int)(1 + skip));
+            (void)args;
+            return (*(FTYPE*)(calleePtr))(ArgAt<Ks>::get(args)...);
         }
         LUAAA_BOUNDARY_CATCH(state, "function call")
     }
@@ -1921,7 +1978,8 @@ namespace LUAAA_NS
     inline TRET LuaInvoke(lua_State* state, void* calleePtr, size_t skip)
     {
         // make_arg_indices skips lua_State* slots so they consume no Lua argument (B8 fix).
-        return LuaInvokeImpl<TRET, FTYPE, ARGS...>(state, calleePtr, skip, typename make_arg_indices<ARGS...>::type());
+        return LuaInvokeImpl<TRET, FTYPE, ARGS...>(state, calleePtr, skip, typename make_arg_indices<ARGS...>::type(),
+                                                   typename make_indices<sizeof...(ARGS)>::type());
     }
 
     // A callable stored in the closure's upvalue 1 and called with the lua
@@ -1991,12 +2049,15 @@ namespace LUAAA_NS
     //========================================================
     // member function invoker
     //========================================================
-    template<typename TCLASS, typename TRET, typename FTYPE, typename ...ARGS, std::size_t... Ns>
-    TRET LuaInvokeInstanceMemberImpl(lua_State* state, void* calleePtr, indices<Ns...>)
+    template<typename TCLASS, typename TRET, typename FTYPE, typename ...ARGS, std::size_t... Ns, std::size_t... Ks>
+    TRET LuaInvokeInstanceMemberImpl(lua_State* state, void* calleePtr, indices<Ns...>, indices<Ks...>)
     {
         LUAAA_BOUNDARY_TRY(calleePtr)
         {
-            return (LuaStack<TCLASS>::get(state, 1).**(FTYPE*)(calleePtr))(LuaStack<ARGS>::get(state, (int)(Ns + 2))...);
+            auto&& self = LuaStack<TCLASS>::get(state, 1);
+            ArgPack<indices<Ns...>, ARGS...> args(state, 2);
+            (void)args;
+            return (self.**(FTYPE*)(calleePtr))(ArgAt<Ks>::get(args)...);
         }
         LUAAA_BOUNDARY_CATCH(state, "member function call")
     }
@@ -2005,7 +2066,8 @@ namespace LUAAA_NS
     inline TRET LuaInvokeInstanceMember(lua_State* state, void* calleePtr)
     {
         // make_arg_indices skips lua_State* slots so they consume no Lua argument (B8 fix).
-        return LuaInvokeInstanceMemberImpl<TCLASS, TRET, FTYPE, ARGS...>(state, calleePtr, typename make_arg_indices<ARGS...>::type());
+        return LuaInvokeInstanceMemberImpl<TCLASS, TRET, FTYPE, ARGS...>(state, calleePtr, typename make_arg_indices<ARGS...>::type(),
+                                                                         typename make_indices<sizeof...(ARGS)>::type());
     }
 
     // A member function pointer stored in upvalue 1 and applied to `self`
@@ -2352,19 +2414,21 @@ namespace LUAAA_NS
     {
         static TCLASS * Invoke(lua_State * state, void * mem, size_t skip)
         {
-            return InvokeImpl(state, mem, typename make_arg_indices<ARGS...>::type(), skip);
+            return InvokeImpl(state, mem, typename make_arg_indices<ARGS...>::type(), typename make_indices<sizeof...(ARGS)>::type(), skip);
         }
 
     private:
-        template<std::size_t ...Ns>
-        static TCLASS * InvokeImpl(lua_State * state, void * mem, indices<Ns...>, size_t skip)
+        template<std::size_t ...Ns, std::size_t ...Ks>
+        static TCLASS * InvokeImpl(lua_State * state, void * mem, indices<Ns...>, indices<Ks...>, size_t skip)
         {
             // A throwing constructor leaves the placement-new'd storage unconstructed
             // (no destructor will run) -- translate the exception so Lua sees a normal
             // error and the host does not terminate.
             LUAAA_BOUNDARY_TRY(lua_touserdata(state, lua_upvalueindex(1)))
             {
-                return new(mem) TCLASS(LuaStack<ARGS>::get(state, Ns + 1 + skip)...);
+                ArgPack<indices<Ns...>, ARGS...> args(state, (int)(1 + skip));
+                (void)args;
+                return new(mem) TCLASS(ArgAt<Ks>::get(args)...);
             }
             LUAAA_BOUNDARY_CATCH(state, "constructor")
         }
