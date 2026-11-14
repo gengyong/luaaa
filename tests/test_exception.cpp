@@ -16,14 +16,12 @@
 //   所有有抛异常风险的调用都在 fork() 子进程中执行 (避免主进程崩溃中断测试),
 //   父进程观测退出码 (正常=0, SIGABRT=134/-6 表示崩溃)。
 #include "luaaa.hpp"
+#include "child_process.h"
 
 #include <cstdio>
 #include <cstdlib>
 #include <stdexcept>
 #include <string>
-#include <unistd.h>
-#include <sys/wait.h>
-#include <fcntl.h>
 using namespace luaaa;
 
 static int P = 0, F = 0;
@@ -52,19 +50,6 @@ static int freeThrowLogic(int x) {
 }
 
 // ====== fork 子进程执行场景, 返回退出码 (0=正常, -sig=被信号杀) ======
-static int run_in_child(int (*scenario)(void)) {
-    pid_t pid = fork();
-    if (pid == 0) {
-        int devnull = open("/dev/null", O_WRONLY);
-        if (devnull >= 0) { dup2(devnull, 1); dup2(devnull, 2); close(devnull); }
-        _exit(scenario());
-    }
-    int status = 0;
-    waitpid(pid, &status, 0);
-    if (WIFEXITED(status)) return WEXITSTATUS(status);
-    if (WIFSIGNALED(status)) return -WTERMSIG(status);
-    return -999;
-}
 
 // 场景: 成员函数抛 std::runtime_error (无 pcall, 直接调用)
 static int scenario_member_throw() {

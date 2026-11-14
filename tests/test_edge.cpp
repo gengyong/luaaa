@@ -2,6 +2,9 @@
 //   M3 修复后 —— 同一 C++ 类型可在多个并存 lua_State 中以【相同】名绑定并各自使用；
 //               用【不同】名绑定同一类型仍应冲突报错。
 //   继承   —— luaaa:extend + override + base 调用。
+// 下面手写的 extend 辅助函数是旧文档里的写法, 靠 getmetatable(o) 取类的 metatable。
+// 2.0 起默认隐藏 metatable (getmetatable 返回 false), 这种脚本要关掉该保护。
+#define LUAAA_PROTECT_METATABLE 0
 #include "luaaa.hpp"
 #include <string>
 #include <cstdio>

@@ -1,15 +1,19 @@
 // 整数窄化 / 无符号负值 / lua_State* 返回 / ctor 名冲突 — 记录既定行为。
 //
 // 本测试【不修复】luaaa.hpp, 仅断言并记录当前行为 (经用户确认保持现状):
-//   B7: 整数 get 窄化静默回绕 (short/char 超 range, 与浮点溢出检查不对称)
+//   B7: 整数 get 窄化 —— 原先记录为「静默回绕」(short/char 超 range, 与浮点溢出检查不对称)。
+//       第八轮评审起默认改为报错 (LUAAA_CHECK_INTEGER_RANGE=1, 用户于 2026-11-13 确认
+//       默认开启, 取代此前「保持现状」的决定); 定义为 0 可恢复静默回绕,
+//       该旧行为由 tests/test_features_no_intrange.cpp 覆盖。与 lua_Integer 等宽的无符号
+//       类型仍接受负值 (按位解释), 所以下面 ull(-1) 的记录不变。
 //   B8: lua_State* 作为函数返回值时 put 为 no-op (Lua 侧无返回值)
 //   B9: 同名 ctor 重复注册仅 printf 不报错, 后者覆盖前者
 //
 // 全部断言当前行为 (PASS), 作为行为基线与文档化记录。
 #include "luaaa.hpp"
 
-// Lua 5.1/LuaJIT 没有 lua_isinteger (5.3+ API); 用 lua_isnumber 近似 (5.1 无整数子类型)。
-#if defined(LUA_VERSION_NUM) && LUA_VERSION_NUM <= 501
+// Lua 5.1 / 5.2 / LuaJIT 没有 lua_isinteger (5.3+ API); 用 lua_isnumber 近似 (这些版本没有整数子类型)。
+#if defined(LUA_VERSION_NUM) && LUA_VERSION_NUM < 503
 inline bool lua_isinteger(lua_State * L, int idx) { return lua_isnumber(L, idx); }
 #endif
 
@@ -68,18 +72,20 @@ int main() {
         .fun("compute", computeWithL)
         .fun("mixed", mixedState);
 
-    // ===== B7: 整数 get 窄化静默回绕 (short 超 range) =====
-    // short 范围 ±32767。99999 超范围, static_cast<short> 静默回绕。
-    // 当前行为: 不报错, 返回回绕值。与浮点路径 (有溢出报错) 不对称 — 记录为既定行为。
-    printf("[B7: 整数 get 窄化回绕 — short(99999) 静默回绕, 记录现状]\n");
+    // ===== B7: 整数 get 窄化 (short 超 range) =====
+    // short 范围 ±32767。99999 超范围。
+    // 第八轮评审前: static_cast<short> 静默回绕 (记录为既定行为, 与浮点路径不对称)。
+    // 现默认行为 (LUAAA_CHECK_INTEGER_RANGE=1): 与浮点路径对称, 报 "number overflow"。
+    printf("[B7: 整数 get 窄化 — short(99999) 默认报错 (LUAAA_CHECK_INTEGER_RANGE=1)]\n");
     {
-        luaL_dostring(L, "g_s = n.s(99999)");
-        lua_Number v = get_num(L, "g_s");
-        short expected = static_cast<short>(99999);  // 当前行为: 同样的回绕
-        printf("    (信息) echo_short(99999) = %g (C++ static_cast<short> 回绕 = %d)\n",
-               (double)v, (int)expected);
-        // 断言当前行为: Lua 侧值与 C++ static_cast 一致 (静默回绕, 不报错)
-        check(v == (lua_Number)expected, "echo_short(99999) 静默回绕 (既定行为, 与浮点不对称)");
+        const bool raised = (luaL_dostring(L, "g_s = n.s(99999)") != 0);
+        if (raised) {
+            printf("    (信息) echo_short(99999) 报错: %s\n", lua_tostring(L, -1));
+            lua_pop(L, 1);
+        }
+        check(raised, "echo_short(99999) 报溢出错误 (不再静默回绕)");
+        check(luaL_dostring(L, "assert(n.s(32767) == 32767 and n.s(-32768) == -32768)") == 0,
+              "echo_short 边界值 ±32767/-32768 正常通过");
     }
 
     // ===== B7: 无符号 get 负值 (-1 -> ULLONG_MAX) =====
@@ -167,7 +173,7 @@ int main() {
         bool ok = lua_isinteger(L2, -1) && lua_tointeger(L2, -1) == 42; lua_pop(L2, 1);
         printf("    (信息) Dual.new(42):getMode() = %s (后者 ctor<int> 覆盖前者)\n",
                ok ? "42" : "?");
-        check(ok, "同名 ctor 后者覆盖前者 (ctor<int> 胜出, 仅 printf 不 luaL_error, 既定行为)");
+        check(ok, "KNOWN-LIMITATION: 同名 ctor 后者覆盖前者, 只 printf 提示不报错 (要并存请用 overloadCtor)");
         lua_close(L2);
     }
 

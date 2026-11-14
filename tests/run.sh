@@ -1,21 +1,51 @@
 #!/usr/bin/env bash
-# 编译并运行 luaaa 全部测试，支持多 Lua 版本 × sanitizer 模式矩阵。
+# 编译并运行 luaaa 全部测试: Lua 版本 × C++ 标准 × sanitizer 模式。
 #
 # 用法:
-#   bash tests/run.sh                # 默认: 当前唯一 Lua (lua5.5), ASan+UBSan
-#   bash tests/run.sh all            # 矩阵: luajit/5.4/5.5 × ASan+UBSan, 5.5 × TSan
-#   SAN_MODE=tsan bash tests/run.sh  # 仅 TSan (默认 asan)
-#   LUA_TARGETS="luajit 5.5" bash tests/run.sh all   # 自选版本子集
-#   CXX=clang++ STD=c++14 bash tests/run.sh all      # 自选编译器/标准
+#   bash tests/run.sh                # 单一配置: 探测到的最新 Lua, c++11, ASan+UBSan
+#   bash tests/run.sh all            # 矩阵: 探测到的全部 Lua × c++11/14/17/20, ASan+UBSan
+#   SAN_MODE=tsan bash tests/run.sh  # 只跑并发测试, 用 TSan
+#   LUA_TARGETS="luajit 5.5" bash tests/run.sh all   # 自选 Lua 版本
+#   STDS="c++11 c++23" bash tests/run.sh all         # 自选 C++ 标准
+#   CXX=clang++ STD=c++14 bash tests/run.sh          # 单一配置下自选编译器 / 标准
 #
 # 环境变量:
 #   CXX         编译器 (默认 g++)
-#   STD         C++ 标准 (默认 c++11)
+#   STD         单一配置下的 C++ 标准 (默认 c++11)
+#   STDS        all 模式下的 C++ 标准列表 (默认 "c++11 c++14 c++17 c++20")
 #   SAN_MODE    asan (默认) | tsan | none
-#   LUA_TARGETS 空格分隔的 Lua 版本 (默认自动探测)
+#   LUA_TARGETS 空格分隔的 Lua 版本 (默认: 探测到的全部; 可选 luajit 5.1 5.2 5.3 5.4 5.5)
+#   JOBS        并行任务数 (默认: CPU 核数)
+#   LUA_CFLAGS / LUA_LIBS  pkg-config 找不到 Lua 时手工指定 (此时只跑这一个 Lua)
 #
-# 退出码: 0 全部通过, 非0 有失败
+# Lua 通过 pkg-config 查找; 装了 Homebrew 时会自动把各 lua@x.y 的 pkgconfig 目录加进搜索路径。
+#
+# 退出码: 0 全部通过, 非 0 有失败
 set -u
+
+# --- 内部: 运行单个任务 (由下面的 xargs 并行调用) --------------------------
+if [ "${1:-}" = "__job" ]; then
+  # shellcheck disable=SC1090
+  . "$2"
+  label="[$J_LUA $J_STD] $(basename "$J_SRC")"
+  {
+    echo "############################################################"
+    echo "# $label"
+    echo "############################################################"
+    # shellcheck disable=SC2086
+    if ! $J_CXX -std=$J_STD -g $J_SAN -I. $J_CFLAGS $J_EXTRA "$J_SRC" $J_LIBS -o "$J_BIN" 2>"$J_LOG.cc"; then
+      echo "  [COMPILE FAIL] $label"
+      sed 's/^/    /' "$J_LOG.cc"
+    else
+      "$J_BIN"
+      echo "  (exit=$?)"
+    fi
+  } > "$J_LOG" 2>&1
+  rm -f "$J_LOG.cc" "$J_BIN"
+  rm -rf "$J_BIN.dSYM"
+  exit 0
+fi
+
 cd "$(dirname "$0")/.."
 
 MODE="${1:-default}"
@@ -23,57 +53,79 @@ CXX="${CXX:-g++}"
 STD="${STD:-c++11}"
 SAN_MODE="${SAN_MODE:-asan}"
 RESULTS="tests/results.txt"
+JOBS="${JOBS:-$( (getconf _NPROCESSORS_ONLN || sysctl -n hw.ncpu || echo 4) 2>/dev/null | head -1)}"
 
 # --- Lua 版本探测 ---------------------------------------------------------
+# Homebrew 的带版本号的 keg (lua@5.4 等) 不在默认的 pkg-config 搜索路径里。
+if command -v brew >/dev/null 2>&1; then
+  BREW_PREFIX="$(brew --prefix 2>/dev/null)"
+  for d in "$BREW_PREFIX"/opt/lua*/lib/pkgconfig "$BREW_PREFIX"/opt/luajit*/lib/pkgconfig; do
+    [ -d "$d" ] && PKG_CONFIG_PATH="$d${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+  done
+  export PKG_CONFIG_PATH
+fi
+
 # 每个 target: "name|cflags|libs"
-declare -a ALL_TARGETS=()
-add_target() {
-  local name="$1" pc="$2"
-  local cflags libs
-  cflags="$(pkg-config --cflags "$pc" 2>/dev/null)" || return 1
-  libs="$(pkg-config --libs "$pc" 2>/dev/null)" || return 1
-  ALL_TARGETS+=("$name|$cflags|$libs")
-  return 0
+ALL_TARGETS=()
+have_target() {
+  local t
+  for t in ${ALL_TARGETS[@]+"${ALL_TARGETS[@]}"}; do [ "${t%%|*}" = "$1" ] && return 0; done
+  return 1
+}
+add_target() {   # add_target <name> <pkg-config 模块名候选...>
+  local name="$1" pc cflags libs; shift
+  have_target "$name" && return 0
+  for pc in "$@"; do
+    if pkg-config --exists "$pc" 2>/dev/null; then
+      cflags="$(pkg-config --cflags "$pc")"; libs="$(pkg-config --libs "$pc")"
+      ALL_TARGETS+=("$name|$cflags|$libs")
+      return 0
+    fi
+  done
+  return 1
 }
 
-probe_targets() {
-  ALL_TARGETS=()
-  # LuaJIT (5.1 API)
-  pkg-config --exists luajit 2>/dev/null && add_target luajit luajit
-  # Lua 5.4
-  PKG_CONFIG_PATH="/opt/homebrew/opt/lua@5.4/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}" \
-    pkg-config --exists lua5.4 2>/dev/null && \
-    PKG_CONFIG_PATH="/opt/homebrew/opt/lua@5.4/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}" add_target 5.4 lua5.4
-  # Lua 5.5 (默认/当前)
-  pkg-config --exists lua5.5 2>/dev/null && add_target 5.5 lua5.5
-}
+if [ -n "${LUA_CFLAGS:-}" ] || [ -n "${LUA_LIBS:-}" ]; then
+  ALL_TARGETS=("custom|${LUA_CFLAGS:-}|${LUA_LIBS:--llua -lm}")
+else
+  add_target luajit luajit
+  for v in 5.1 5.2 5.3 5.4 5.5; do
+    add_target "$v" "lua$v" "lua-$v" "lua${v/./}"
+  done
+  # 不带版本号的 "lua" 模块: 按它报告的版本归类 (该版本还没找到时才用)
+  if pkg-config --exists lua 2>/dev/null; then
+    v="$(pkg-config --modversion lua | cut -d. -f1,2)"
+    add_target "$v" lua
+  fi
+fi
+if [ ${#ALL_TARGETS[@]} -eq 0 ]; then
+  echo "[FATAL] pkg-config 找不到任何 Lua。请安装 Lua 的开发包, 或设置 LUA_CFLAGS / LUA_LIBS。" >&2
+  exit 2
+fi
 
 if [ "$MODE" = "all" ]; then
-  probe_targets
-  if [ ${#ALL_TARGETS[@]} -eq 0 ]; then
-    echo "[FATAL] 未探测到任何 Lua 版本" >&2; exit 2
-  fi
+  STD_LIST="${STDS:-c++11 c++14 c++17 c++20}"
   if [ -z "${LUA_TARGETS:-}" ]; then
     LUA_TARGETS=""
     for t in "${ALL_TARGETS[@]}"; do LUA_TARGETS+=" ${t%%|*}"; done
   fi
 else
-  # 默认模式: 单一当前 Lua (兼容旧行为)
-  LUA_CFLAGS="$(pkg-config --cflags lua5.5 2>/dev/null || pkg-config --cflags lua 2>/dev/null || echo '-I/opt/homebrew/include/lua')"
-  LUA_LIBS="$(pkg-config --libs lua5.5 2>/dev/null || pkg-config --libs lua 2>/dev/null || echo '-L/opt/homebrew/lib -llua -lm')"
-  ALL_TARGETS=("default|$LUA_CFLAGS|$LUA_LIBS")
-  LUA_TARGETS="default"
+  STD_LIST="$STD"
+  # 单一配置: 探测到的最新 PUC Lua, 没有则 LuaJIT
+  if [ -z "${LUA_TARGETS:-}" ]; then
+    LUA_TARGETS="${ALL_TARGETS[${#ALL_TARGETS[@]}-1]%%|*}"
+  fi
 fi
 
-# 解析选中的 targets
-declare -a SELECTED=()
+SELECTED=()
 for want in $LUA_TARGETS; do
   for t in "${ALL_TARGETS[@]}"; do
     [ "${t%%|*}" = "$want" ] && SELECTED+=("$t")
   done
 done
 if [ ${#SELECTED[@]} -eq 0 ]; then
-  echo "[FATAL] 选中的 Lua_TARGETS ($LUA_TARGETS) 无一可用" >&2; exit 2
+  echo "[FATAL] 选中的 LUA_TARGETS ($LUA_TARGETS) 无一可用; 探测到: $(for t in "${ALL_TARGETS[@]}"; do printf '%s ' "${t%%|*}"; done)" >&2
+  exit 2
 fi
 
 # --- sanitizer 配置 -------------------------------------------------------
@@ -88,128 +140,135 @@ case "$SAN_MODE" in
 esac
 
 # --- 测试文件清单 ---------------------------------------------------------
-# 格式: "文件名|是否需要 stdlib|是否并发"
+# 格式: "文件名|是否并发测试"
 ALL_TESTS=(
-  "tests/test_functional.cpp|1|0"
-  "tests/test_fixes.cpp|1|0"
-  "tests/test_callbacks.cpp|1|0"
-  "tests/test_bugs.cpp|1|0"
-  "tests/test_edge.cpp|1|0"
-  "tests/test_extend.cpp|1|0"
-  "tests/test_numeric.cpp|1|0"
-  "tests/test_containers.cpp|1|0"
-  "tests/test_def_singleton.cpp|1|0"
-  "tests/test_cast.cpp|1|0"
-  "tests/test_property.cpp|1|0"
-  "tests/test_lifetime.cpp|1|0"
-  "tests/test_callbacks_ptr.cpp|1|0"
-  "tests/test_features.cpp|1|0"
-  "tests/test_features_no_property.cpp|1|0"
-  "tests/test_features_no_extend.cpp|1|0"
-  "tests/test_features_no_conflict.cpp|1|0"
-  "tests/test_overload.cpp|1|0"
-  "tests/test_metamethod.cpp|1|0"
-  "tests/test_float_edge.cpp|1|0"
-  "tests/test_containers_edge.cpp|1|0"
-  "tests/test_exception.cpp|1|0"
-  "tests/test_strings.cpp|1|0"
-  "tests/test_static_const.cpp|1|0"
-  "tests/test_forward_list.cpp|1|0"
-  "tests/test_property_except.cpp|1|0"
-  "tests/test_gc_except.cpp|1|0"
-  "tests/test_numeric_edge2.cpp|1|0"
-  "tests/test_review3.cpp|1|0"
-  "tests/test_concurrency.cpp|1|1"
+  "tests/test_functional.cpp|0"
+  "tests/test_fixes.cpp|0"
+  "tests/test_callbacks.cpp|0"
+  "tests/test_bugs.cpp|0"
+  "tests/test_edge.cpp|0"
+  "tests/test_extend.cpp|0"
+  "tests/test_numeric.cpp|0"
+  "tests/test_containers.cpp|0"
+  "tests/test_def_singleton.cpp|0"
+  "tests/test_cast.cpp|0"
+  "tests/test_property.cpp|0"
+  "tests/test_lifetime.cpp|0"
+  "tests/test_callbacks_ptr.cpp|0"
+  "tests/test_features.cpp|0"
+  "tests/test_features_no_property.cpp|0"
+  "tests/test_features_no_extend.cpp|0"
+  "tests/test_features_no_conflict.cpp|0"
+  "tests/test_features_no_intrange.cpp|0"
+  "tests/test_features_nil_nullptr.cpp|0"
+  "tests/test_overload.cpp|0"
+  "tests/test_metamethod.cpp|0"
+  "tests/test_float_edge.cpp|0"
+  "tests/test_containers_edge.cpp|0"
+  "tests/test_exception.cpp|0"
+  "tests/test_strings.cpp|0"
+  "tests/test_static_const.cpp|0"
+  "tests/test_forward_list.cpp|0"
+  "tests/test_property_except.cpp|0"
+  "tests/test_gc_except.cpp|0"
+  "tests/test_numeric_edge2.cpp|0"
+  "tests/test_review3.cpp|0"
+  "tests/test_review7.cpp|0"
+  "tests/test_review8.cpp|0"
+  "tests/test_review9.cpp|0"
+  "tests/test_review10.cpp|0"
+  "tests/test_concurrency.cpp|1"
 )
 
-# --- 运行单测 -------------------------------------------------------------
-# 全局累计
-TOTAL_PASS=0
-TOTAL_FAIL=0
-FAIL_RECORDS=""   # "lua:file" 列表
-COMPILE_FAILS=""
+# --- 生成任务并并行运行 ---------------------------------------------------
+WORK="$(mktemp -d "${TMPDIR:-/tmp}/luaaa_run.XXXXXX")"
+trap 'rm -rf "$WORK"' EXIT
+q() { printf '%q' "$1"; }
 
-run_one() {
-  local lua_name="$1" cflags="$2" libs="$3" src="$4" extra="$5"
-  local bin="/tmp/luaaa_$(basename "$src" .cpp)_${lua_name}"
-  local label="[$lua_name] $(basename "$src")"
-  {
-    echo "############################################################"
-    echo "# $label"
-    echo "############################################################"
-  }
-  if ! $CXX -std=$STD -g $SAN -I. $cflags $libs $extra "$src" -o "$bin" 2>/tmp/cc.log; then
-    echo "  [COMPILE FAIL] $label"
-    sed 's/^/    /' /tmp/cc.log
-    COMPILE_FAILS="$COMPILE_FAILS $lua_name:$(basename "$src")"
-    return 1
-  fi
-  "$bin"; local rc=$?
-  echo "  (exit=$rc)"
-  return 0
-}
-
-# 从测试输出最后行 "=== name: N passed, M failed ===" 提取
-parse_summary() {
-  local out="$1"
-  # 抓最后一行 === xxx: P passed, F failed ===
-  grep -E "^=== .* [0-9]+ passed, [0-9]+ failed ===" "$out" | tail -1
-}
-
-# --- 主循环: targets × tests ---------------------------------------------
-: > "$RESULTS"
+n=0
 for target in "${SELECTED[@]}"; do
   lua_name="${target%%|*}"; rest="${target#*|}"
   cflags="${rest%%|*}"; libs="${rest#*|}"
-
-  echo "================================================================"
-  echo "== Lua: $lua_name   (cflags: $cflags  libs: $libs)"
-  echo "================================================================" | tee -a "$RESULTS"
-
-  for entry in "${ALL_TESTS[@]}"; do
-    src="${entry%%|*}"; rest="${entry#*|}"
-    need_stdlib="${rest%%|*}"; is_concurrent="${rest#*|}"
-
-    # TSan 模式仅跑并发测试 (TSan 构建开销大, 且非并发测试无收益)
-    if [ "$SAN_MODE" = "tsan" ] && [ "$is_concurrent" != "1" ]; then
-      continue
-    fi
-    # 5.1/LuaJIT 不跑 stdlib-only 测试里的并发(无 stdlib 需求差异, 但并发测试需要 thread)
-    # 实际所有测试都用 stdlib; 此开关为未来 LUAAA_WITHOUT_CPP_STDLIB 测试预留
-
-    tmpout="/tmp/luaaa_run_${lua_name}_$(basename "$src" .cpp).log"
-    # 并发测试需要链接 pthread
-    extra=""
-    [ "$is_concurrent" = "1" ] && extra="-pthread"
-    run_one "$lua_name" "$cflags" "$libs" "$src" "$extra" > "$tmpout" 2>&1
-    cat "$tmpout"
-    cat "$tmpout" >> "$RESULTS"
-
-    summary="$(parse_summary "$tmpout")"
-    if [ -n "$summary" ]; then
-      p="$(echo "$summary" | sed -nE 's/.*: ([0-9]+) passed.*/\1/p')"
-      f="$(echo "$summary" | sed -nE 's/.*([0-9]+) failed ===/\1/p')"
-      TOTAL_PASS=$((TOTAL_PASS + ${p:-0}))
-      TOTAL_FAIL=$((TOTAL_FAIL + ${f:-0}))
-      [ "${f:-0}" -gt 0 ] && FAIL_RECORDS="$FAIL_RECORDS $lua_name:$(basename "$src")"
-    fi
+  for std in $STD_LIST; do
+    for entry in "${ALL_TESTS[@]}"; do
+      src="${entry%%|*}"; is_concurrent="${entry#*|}"
+      # TSan 构建开销大, 对非并发测试没有收益: 只跑并发测试
+      if [ "$SAN_MODE" = "tsan" ] && [ "$is_concurrent" != "1" ]; then continue; fi
+      extra=""
+      [ "$is_concurrent" = "1" ] && extra="-pthread"
+      n=$((n + 1))
+      id="$(printf '%05d' "$n")"
+      {
+        echo "J_CXX=$(q "$CXX")";       echo "J_STD=$(q "$std")"
+        echo "J_SAN=$(q "$SAN")";       echo "J_LUA=$(q "$lua_name")"
+        echo "J_CFLAGS=$(q "$cflags")"; echo "J_LIBS=$(q "$libs")"
+        echo "J_EXTRA=$(q "$extra")";   echo "J_SRC=$(q "$src")"
+        echo "J_BIN=$(q "$WORK/$id.bin")"; echo "J_LOG=$(q "$WORK/$id.log")"
+      } > "$WORK/$id.job"
+    done
   done
 done
 
+echo "luaaa tests: $n 个任务, $JOBS 路并行  (CXX=$CXX SAN=$SAN_MODE)"
+echo "  Lua : $(for t in "${SELECTED[@]}"; do printf '%s ' "${t%%|*}"; done)"
+echo "  C++ : $STD_LIST"
+ls "$WORK"/*.job | xargs -P "$JOBS" -n 1 bash "$0" __job
+
 # --- 汇总 -----------------------------------------------------------------
+# 每个测试最后一行形如 "=== name: N passed, M failed ==="
+TOTAL_PASS=0
+TOTAL_FAIL=0
+FAIL_RECORDS=""
+COMPILE_FAILS=""
+NO_SUMMARY=""
+: > "$RESULTS"
+for job in "$WORK"/*.job; do
+  # shellcheck disable=SC1090
+  . "$job"
+  tag="$J_LUA/$J_STD:$(basename "$J_SRC")"
+  cat "$J_LOG" >> "$RESULTS"
+  if grep -q "\[COMPILE FAIL\]" "$J_LOG"; then
+    COMPILE_FAILS="$COMPILE_FAILS $tag"
+    cat "$J_LOG"
+    continue
+  fi
+  summary="$(grep -E "^=== .* [0-9]+ passed, [0-9]+ failed ===" "$J_LOG" | tail -1)"
+  if [ -z "$summary" ]; then
+    # 没有汇总行: 退出码为 0 说明该测试本来就不输出汇总 (只打印信息);
+    # 非 0 则是崩溃或被 sanitizer 中止。
+    if ! grep -q "^  (exit=0)$" "$J_LOG"; then
+      NO_SUMMARY="$NO_SUMMARY $tag"
+      cat "$J_LOG"
+    fi
+    continue
+  fi
+  p="$(echo "$summary" | sed -nE 's/.*: ([0-9]+) passed.*/\1/p')"
+  f="$(echo "$summary" | sed -nE 's/.*[^0-9]([0-9]+) failed ===/\1/p')"
+  TOTAL_PASS=$((TOTAL_PASS + ${p:-0}))
+  TOTAL_FAIL=$((TOTAL_FAIL + ${f:-0}))
+  if [ "${f:-0}" -gt 0 ]; then
+    FAIL_RECORDS="$FAIL_RECORDS $tag"
+    cat "$J_LOG"
+  fi
+done
+SAN_REPORTS="$(grep -cE "ERROR: (Address|Thread|Leak)Sanitizer|runtime error:|WARNING: ThreadSanitizer" "$RESULTS")"
+
 echo
 echo "================================================================"
-echo "MATRIX SUMMARY   (CXX=$CXX STD=$STD SAN=$SAN_MODE)"
+echo "MATRIX SUMMARY   (CXX=$CXX SAN=$SAN_MODE)"
 echo "================================================================"
-echo "  Lua targets : $(echo "${SELECTED[@]}" | sed 's/|[^ ]*//g')"
+echo "  Lua targets : $(for t in "${SELECTED[@]}"; do printf '%s ' "${t%%|*}"; done)"
+echo "  C++ stds    : $STD_LIST"
 echo "  Total PASS  : $TOTAL_PASS"
 echo "  Total FAIL  : $TOTAL_FAIL"
-[ -n "$COMPILE_FAILS" ] && echo "  COMPILE FAIL: $COMPILE_FAILS"
+echo "  Sanitizer   : $SAN_REPORTS 条报告"
+[ -n "$COMPILE_FAILS" ] && echo "  COMPILE FAIL:$COMPILE_FAILS"
+[ -n "$NO_SUMMARY" ]    && echo "  CRASHED     :$NO_SUMMARY"
 [ -n "$FAIL_RECORDS" ]  && echo "  FAIL cases  :$FAIL_RECORDS"
 echo "  Details     : $RESULTS"
 echo
 
-if [ "$TOTAL_FAIL" -gt 0 ] || [ -n "$COMPILE_FAILS" ]; then
+if [ "$TOTAL_FAIL" -gt 0 ] || [ -n "$COMPILE_FAILS" ] || [ -n "$NO_SUMMARY" ] || [ "$SAN_REPORTS" -gt 0 ]; then
   exit 1
 fi
 exit 0

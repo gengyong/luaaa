@@ -135,7 +135,7 @@ print(c)               -- __tostring：输出 "Bingo (1y)"
 c:play(10)
 ```
 
-> 注意：用 `fun` 绑定的 `static` 或自由函数，在 Lua 里是**当作方法来调用**的 —— 写法是 `c:meow("Bingo")`。冒号前面的实例会被当成隐藏的 `self` 参数传入并自动跳过，剩下的实参会依次传给函数的形参。
+> 注意：用 `fun` 绑定的 `static` 或自由函数，在 Lua 里是**当作方法来调用**的 —— 写法是 `c:meow("Bingo")`。冒号前面的实例会被当成隐藏的 `self` 参数传入并自动跳过，剩下的实参会依次传给函数的形参。想在类本身上调用 —— `Cat.meow("Bingo")` —— 改用 `staticFun` 绑定；`constant` 则把常量放在类表上（`Cat.MAX_LIVES`）。
 
 ## 构造函数
 
@@ -223,6 +223,8 @@ felix:learn()
 felix:meow("Felix")
 ```
 
+每次 `SpecialCat:new(...)` 都会创建一个独立的实例，各自拥有自己的 C++ `Cat`；扩展出来的类还可以继续扩展。详见 [Lua 侧继承详解](GUIDE.zh-CN.md#lua-侧继承详解)。
+
 ## 把 Lua 函数当作 C++ 回调
 
 C++ 函数可以直接接收 Lua 端传过来的函数作为回调。把对应参数的类型声明为 `std::function`（推荐）或者普通的函数指针即可：
@@ -268,12 +270,16 @@ c++ -std=c++11 example.cpp -I/usr/include/lua5.4 -llua5.4 -lm -o example && ./ex
 * 自动类型转换，以及完整的容器 / `pair` / `tuple` 支持列表
 * 用 `LuaStack` 教会 luaaa 如何处理你自己的类型
 * 构造函数的各种形态：工厂、单例、自定义析构器、命名冲突
-* 重载函数的消歧
+* 重载函数：消歧，以及用 `overload` / `overloadCtor` 把多个函数注册到同一个 Lua 名字下
+* 用 `inherit<Base>()` 声明 C++ 继承
+* `std::shared_ptr` / `std::unique_ptr`、`std::optional`、`std::string_view`、只能移动的返回类型
 * 回调详解（`std::function` vs 裸指针）
 * 元方法（`__index`、`__newindex`、`__gc`、`__tostring`）
 * 同时使用多个 `lua_State`
 * 面向单片机等环境的**嵌入式 / 无标准库**构建
 * 特性宏、GC 所有权规则，以及常见问题排查
+
+从 1.x 升级？[CHANGELOG.zh-CN.md](CHANGELOG.zh-CN.md) 列出了 2.0 的全部变化，包括不兼容的改动。
 
 ## 许可证
 

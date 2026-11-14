@@ -155,12 +155,16 @@ int main() {
         check(!r, "float get NaN 透传 (NaN ~= NaN)");
     }
 
-    // ===== +inf get 应报溢出 (inf > FLT_MAX) =====
-    printf("[+inf get 应报溢出]\n");
+    // ===== +inf / -inf 透传 (第九轮 R9-1 起: 无穷大是合法浮点值, 不算溢出) =====
+    // 原先这里断言「+inf get 应报溢出 (inf > FLT_MAX)」; 现在只有「有限但超出
+    // 目标类型范围」的值 (如上面的 1e300 -> float) 才报溢出。
+    printf("[+inf / -inf get 透传]\n");
     {
-        bool r = raises(L, "g_inf = fe.f(math.huge)");
-        printf("    (信息) echo_f(+inf) raises=%d (期望 true)\n", (int)r);
-        check(r, "float get +inf 应报溢出 (inf > FLT_MAX)");
+        bool r = raises(L, "g_inf = fe.f(math.huge); assert(g_inf == math.huge, 'is +inf')");
+        printf("    (信息) echo_f(+inf) raises=%d (期望 false)\n", (int)r);
+        check(!r, "float get +inf 透传 (不再报溢出)");
+        r = raises(L, "g_ninf = fe.f(-math.huge); assert(g_ninf == -math.huge, 'is -inf')");
+        check(!r, "float get -inf 透传 (不再报溢出)");
     }
 
     lua_close(L);
