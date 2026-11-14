@@ -2,14 +2,14 @@
 //
 // 覆盖未测分支:
 //   - const char* 单次调用内有效 (L3 文档化行为正向断言)
-//   - std::string 嵌入 NUL — 实证: c_str() 截断, 嵌入 NUL 丢失 (既定限制)
+//   - std::string 嵌入 NUL — 双向保留 (R9-9 修复); const char* 仍在 NUL 处截断 (KNOWN-LIMITATION)
 //   - Lua 二进制安全字符串 -> const char* 丢失 NUL 后内容
 //   - 空串 "" 往返
 //   - UTF-8 多字节 ("中文") 往返字节一致
 //   - char* 特化 echo 往返
 //   - const char* 对 number/bool 的 tostring 强转 (L2 既定语义回归)
 //
-// 设计原则: 断言「正确/合理」行为; 记录既定限制 (嵌入 NUL 截断) 但标明。
+// 设计原则: 断言「正确/合理」行为; 把错误行为写成预期的断言一律以 KNOWN-LIMITATION 标出。
 #include "luaaa.hpp"
 
 // Lua 5.1/LuaJIT 没有 lua_rawlen (5.2+ API); 用 lua_objlen 提供 polyfill,
@@ -76,10 +76,9 @@ int main() {
     check(!raises(L, "assert(s.cstr('中文') == '中文')"), "const char* UTF-8 '中文' 往返");
     check(!raises(L, "assert(s.str('日本語') == '日本語')"), "std::string UTF-8 往返");
 
-    // ===== ⭐ 实证既定限制: std::string 嵌入 NUL 被 c_str() 截断 =====
-    // std::string::put 用 s.c_str() (luaaa.hpp:700), 在首个 NUL 截断。
-    // std::string 内部可存 NUL, 但经 luaaa 往返后 NUL 后内容丢失。
-    printf("[std::string 嵌入 NUL — 实证: c_str() 截断, NUL 后内容丢失]\n");
+    // ===== std::string 嵌入 NUL: 双向保留 (R9-9) =====
+    // put 用 lua_pushlstring, get 用 lua_tolstring, 长度随字符串一起走。
+    printf("[std::string 嵌入 NUL — 双向保留]\n");
     {
         // 构造含嵌入 NUL 的 std::string (size=3, 内容 'a' \0 'b')
         std::string embedded("a\0b", 3);
@@ -92,9 +91,10 @@ int main() {
         lua_getglobal(L, "g_emb");
         lua_Integer luallen = lua_rawlen(L, -1); lua_pop(L, 1);
         lua_pop(L, 1);  // 清理之前的 put
-        printf("    (信息) Lua 侧 #string = %lld (c_str 截断, 期望1)\n", (long long)luallen);
-        // 既定限制: c_str() 截断致 Lua 侧只看到 NUL 前内容
-        check(luallen == 1, "std::string 嵌入 NUL 经 luaaa 往返后被 c_str() 截断 (既定限制, 非bug)");
+        printf("    (信息) Lua 侧 #string = %lld (期望3)\n", (long long)luallen);
+        check(luallen == 3, "C++ std::string(\"a\\0b\", 3) 到 Lua 后长度仍为 3");
+        check(!raises(L, "local s3 = 'a' .. string.char(0) .. 'b'; local r = s.str(s3); assert(#r == 3 and r == s3)"),
+              "Lua 的 'a\\0b' 经 std::string 参数往返后长度仍为 3");
     }
 
     // ===== Lua 二进制安全字符串 -> const char* (lua_tostring 丢失长度信息) =====
@@ -112,7 +112,8 @@ int main() {
         lua_Integer echolen = lua_rawlen(L, -1); lua_pop(L, 1);
         printf("    (信息) echo_cstr(g_bin) 返回串长度=%lld (期望1, const char* 无长度信息)\n",
                (long long)echolen);
-        check(echolen == 1, "const char* 往返丢失 NUL 后内容 (lua_tostring 无长度, 既定限制)");
+        // KNOWN-LIMITATION: const char* 是 C 字符串, 在第一个 NUL 处结束; 要保留请用 std::string
+        check(echolen == 1, "KNOWN-LIMITATION: const char* 往返丢失 NUL 之后的内容");
     }
 
     // ===== const char* 对 number/bool 的 tostring 强转 (L2 回归) =====

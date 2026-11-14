@@ -174,7 +174,7 @@ int main() {
         check(luaL_dostring(L, "S.store('hello')") == 0, "存储 const char*");
         check(luaL_dostring(L, "assert(S.read() == 'hello')") == 0, "立即读回有效");
         printf("    (信息) const char* 单次调用内安全, 跨调用存储有悬垂风险\n");
-        check(true, "const char* 文档化: 跨调用存储不安全 (已知限制)");
+        check(true, "KNOWN-LIMITATION: const char* 参数不能跨调用保存 (仅文档约定, 此处不作实测)");
         lua_close(L);
     }
 

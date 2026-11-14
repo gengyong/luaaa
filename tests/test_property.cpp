@@ -99,8 +99,7 @@ int main() {
     }
 
     // ===== 对照: 模块 __index (luaaa.hpp:2388 nresults=1, 正确) =====
-    // 注: 模块 property/__index 机制依赖 USE_NEW_MODULE_REGISTRY (Lua 5.2+ 的 luaL_setfuncs).
-    //     LuaJIT/5.1 走 luaL_openlib 旧路径, 不挂模块 __index 元方法 — 这是既有限制, 非 H1 修复回归.
+    // 注: 2.0 起模块表统一显式建表, 5.1/LuaJIT 与 5.2+ 行为一致 (此前 5.1 路径不触发模块 __index)。
     printf("[模块 __index 返回值 — 对照组 luaaa.hpp:2388]\n");
     {
         luaL_dostring(L, "g_midx = M.nonexistent");
@@ -109,12 +108,7 @@ int main() {
         lua_Integer val = lua_tointeger(L, -1); lua_pop(L, 1);
         printf("    (信息) M.nonexistent -> is_number=%d val=%lld (calls=%d)\n",
                is_num, (long long)val, g_mod_idx_calls);
-#if !defined(LUA_VERSION_NUM) || LUA_VERSION_NUM <= 501
-        // LuaJIT/5.1: 模块 __index 不触发 (既有限制), 跳过该断言
-        check(true, "模块 __index 在 5.1/LuaJIT 上不触发 (USE_NEW_MODULE_REGISTRY=0 既有限制)");
-#else
-        check(is_num && val == 777, "模块 __index 返回值能取到 (nresults=1 正确, 对照)");
-#endif
+        check(is_num && val == 777, "模块 __index 返回值能取到 (所有 Lua 版本)");
     }
 
     // ===== __index 契约: 非字符串 key (table) 应返回 nil 而非报错 (M3 修复) =====

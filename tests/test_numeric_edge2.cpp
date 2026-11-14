@@ -12,8 +12,8 @@
 // 全部断言当前行为 (PASS), 作为行为基线与文档化记录。
 #include "luaaa.hpp"
 
-// Lua 5.1/LuaJIT 没有 lua_isinteger (5.3+ API); 用 lua_isnumber 近似 (5.1 无整数子类型)。
-#if defined(LUA_VERSION_NUM) && LUA_VERSION_NUM <= 501
+// Lua 5.1 / 5.2 / LuaJIT 没有 lua_isinteger (5.3+ API); 用 lua_isnumber 近似 (这些版本没有整数子类型)。
+#if defined(LUA_VERSION_NUM) && LUA_VERSION_NUM < 503
 inline bool lua_isinteger(lua_State * L, int idx) { return lua_isnumber(L, idx); }
 #endif
 
@@ -173,7 +173,7 @@ int main() {
         bool ok = lua_isinteger(L2, -1) && lua_tointeger(L2, -1) == 42; lua_pop(L2, 1);
         printf("    (信息) Dual.new(42):getMode() = %s (后者 ctor<int> 覆盖前者)\n",
                ok ? "42" : "?");
-        check(ok, "同名 ctor 后者覆盖前者 (ctor<int> 胜出, 仅 printf 不 luaL_error, 既定行为)");
+        check(ok, "KNOWN-LIMITATION: 同名 ctor 后者覆盖前者, 只 printf 提示不报错 (要并存请用 overloadCtor)");
         lua_close(L2);
     }
 

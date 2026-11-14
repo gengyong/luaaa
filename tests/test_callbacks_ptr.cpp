@@ -69,7 +69,7 @@ int main() {
         lua_Integer got = lua_tointeger(L, -1); lua_pop(L, 1);
         printf("    (信息) calltwo(f1,f2,5) = %lld (正确值应为 5500)\n", (long long)got);
         // 文档化 H2: 当前实现下两回调踩踏, 结果 != 5500
-        check(got != 5500, "函数指针 H2 踩踏实证: 两同签名回调结果错误 (已知限制)");
+        check(got != 5500, "KNOWN-LIMITATION: 函数指针回调同签名只有一个槽位, 两个同签名回调互相踩踏");
     }
 
     // ===== 对照: std::function 同签名两回调并存正常 =====

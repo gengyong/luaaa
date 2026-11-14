@@ -64,14 +64,16 @@ static lua_State* g_main = nullptr;
 static bool onMain(lua_State* L) { return L == g_main; }
 
 // ===================== H1 =====================
+// 2.0 起 metatable 对脚本隐藏 (R9-8): o.__gc 取不到, getmetatable(o) 返回 false。
+// __gc 仍可经 debug 库拿到, 所以 R7-1 的防护照旧要测, 只是改从 debug.getmetatable 取。
 static void test_h1() {
     printf("[H1: __gc 幂等]\n");
     {
         Tracker::reset();
         lua_State* L = luaL_newstate(); luaL_openlibs(L);
         LuaClass<Tracker>(L, "Tracker").ctor<int>().fun("get", &Tracker::get);
-        check(lua_ok(L, "local o = Tracker.new(5); o:__gc(); o = nil; collectgarbage(); collectgarbage()"),
-              "脚本手动 o:__gc() 后再 GC 不报错");
+        check(lua_ok(L, "local o = Tracker.new(5); debug.getmetatable(o).__gc(o); o = nil; collectgarbage(); collectgarbage()"),
+              "脚本手动调 __gc(o) 后再 GC 不报错");
         lua_close(L);
         check(Tracker::s_ctor == 1 && Tracker::s_dtor == 1, "手动 __gc + GC: 析构恰好一次 (ctor=1, dtor=1)");
     }
@@ -79,7 +81,7 @@ static void test_h1() {
         Tracker::reset();
         lua_State* L = luaL_newstate(); luaL_openlibs(L);
         LuaClass<Tracker>(L, "Tracker").ctor<int>().fun("get", &Tracker::get);
-        check(lua_ok(L, "local o = Tracker.new(5); o:__gc(); local ok = pcall(o.get, o); assert(ok == false, 'method on finalized object must raise')"),
+        check(lua_ok(L, "local o = Tracker.new(5); debug.getmetatable(o).__gc(o); local ok = pcall(o.get, o); assert(ok == false, 'method on finalized object must raise')"),
               "已终结对象上调方法 -> lua 错误 (而非访问已析构对象)");
         lua_close(L);
     }
@@ -87,7 +89,7 @@ static void test_h1() {
         Tracker::reset();
         lua_State* L = luaL_newstate(); luaL_openlibs(L);
         LuaClass<Tracker>(L, "Tracker").ctor<int>().fun("__gc", &Tracker::userGc);
-        lua_ok(L, "local o = Tracker.new(5); o:__gc(); o:__gc(); o = nil; collectgarbage(); collectgarbage()");
+        lua_ok(L, "local o = Tracker.new(5); local gc = debug.getmetatable(o).__gc; gc(o); gc(o); o = nil; collectgarbage(); collectgarbage()");
         lua_close(L);
         check(Tracker::s_userGc == 1, "用户 __gc 只运行一次 (手动两次 + GC 一次)");
         check(Tracker::s_ctor == 1 && Tracker::s_dtor == 1, "带用户 __gc 时析构仍恰好一次");
@@ -97,7 +99,7 @@ static void test_h1() {
         lua_State* L = luaL_newstate(); luaL_openlibs(L);
         LuaClass<Tracker>(L, "Tracker").ctor<int>().fun("get", &Tracker::get);
         // 外来 userdata (io.stdout) 不是本类对象: 不得被当成 UserDataDetail 解释
-        check(lua_ok(L, "local o = Tracker.new(5); getmetatable(o).__gc(io.stdout); assert(io.stdout:write('') ~= nil); assert(o:get() == 5)"),
+        check(lua_ok(L, "local o = Tracker.new(5); debug.getmetatable(o).__gc(io.stdout); assert(io.stdout:write('') ~= nil); assert(o:get() == 5)"),
               "对外来 userdata 调 __gc 被忽略, 两个对象都完好");
         lua_close(L);
         check(Tracker::s_ctor == 1 && Tracker::s_dtor == 1, "外来 userdata 场景析构计数平衡");

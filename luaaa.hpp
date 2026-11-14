@@ -9,8 +9,8 @@
 #define HEADER_LUAAA_HPP
 
 #define LUAAA_NS luaaa
-#define LUAAA_VER_MAJOR (1)
-#define LUAAA_VER_MINOR (5)
+#define LUAAA_VER_MAJOR (2)
+#define LUAAA_VER_MINOR (0)
 
 /// if you want to disable C++ std libs, set to 1
 #ifndef LUAAA_WITHOUT_CPP_STDLIB
@@ -44,6 +44,28 @@
 #define LUAAA_FEATURE_EXTEND 1
 #endif
 
+/// let a lua `nil` (or a missing argument) reach a `T*` parameter as nullptr.
+/// OFF by default: with it on, a script that passes nil where an object was
+/// expected no longer gets an argument error -- the bound function receives
+/// nullptr and MUST check for it. (std::optional<T>, std::shared_ptr<T> and
+/// std::unique_ptr<T> parameters always accept nil.)
+#ifndef LUAAA_NIL_AS_NULLPTR
+#define LUAAA_NIL_AS_NULLPTR 0
+#endif
+
+/// hide the metatable of bound objects from scripts: getmetatable(obj) returns
+/// false, so a script cannot reach or replace __gc / __index / the methods.
+/// set to 0 if your scripts rely on getmetatable(obj) of a bound object.
+#ifndef LUAAA_PROTECT_METATABLE
+#define LUAAA_PROTECT_METATABLE 1
+#endif
+
+/// also record every class / module table in package.loaded under its name,
+/// so `require "name"` returns it (skipped when the state has no package.loaded).
+#ifndef LUAAA_REGISTER_IN_PACKAGE_LOADED
+#define LUAAA_REGISTER_IN_PACKAGE_LOADED 1
+#endif
+
 extern "C"
 {
 #include "lua.h"
@@ -51,44 +73,46 @@ extern "C"
 #include "lauxlib.h"
 }
 
+// Compatibility shims. They are LUAAA_-prefixed functions of our own rather
+// than definitions of the 5.2+ API names (lua_rawgetp, lua_rawsetp, ...): a
+// header that defines those names collides with every other library that
+// polyfills them too (lua-compat-5.3, LuaJIT's own 5.2 extensions, ...).
+// t[p] with a light userdata key, raw. `idx` may be relative or a pseudo-index.
+inline void LUAAA_rawgetp(lua_State * L, int idx, const void * p) {
 #if !defined LUA_VERSION_NUM || LUA_VERSION_NUM <= 501
-inline void luaL_setfuncs(lua_State * L, const luaL_Reg * l, int nup) {
-    luaL_checkstack(L, nup + 1, "too many upvalues");
-    for (; l->name != nullptr; l++) {
-        int i;
-        lua_pushstring(L, l->name);
-        for (i = 0; i < nup; i++)
-            lua_pushvalue(L, -(nup + 1));
-        lua_pushcclosure(L, l->func, nup);
-        lua_settable(L, -(nup + 3));
-    }
-    lua_pop(L, nup);
-}
-
-inline void luaL_setmetatable(lua_State * L, const char * tname) {
-    luaL_getmetatable(L, tname);
-    lua_setmetatable(L, -2);
-}
-
-// lua_rawgetp / lua_rawsetp were introduced in 5.2; provide them for 5.1 / luajit.
-// Only used here with LUA_REGISTRYINDEX (a pseudo-index unaffected by stack changes).
-inline int lua_rawgetp(lua_State * L, int idx, const void * p) {
+    if (idx < 0 && idx > LUA_REGISTRYINDEX) idx = lua_gettop(L) + idx + 1;
     lua_pushlightuserdata(L, const_cast<void*>(p));
     lua_rawget(L, idx);
-    return lua_type(L, -1);
+#else
+    lua_rawgetp(L, idx, p);
+#endif
 }
 
-inline void lua_rawsetp(lua_State * L, int idx, const void * p) {
+// t[p] = <top of stack> with a light userdata key, raw; pops the value.
+inline void LUAAA_rawsetp(lua_State * L, int idx, const void * p) {
+#if !defined LUA_VERSION_NUM || LUA_VERSION_NUM <= 501
+    if (idx < 0 && idx > LUA_REGISTRYINDEX) idx = lua_gettop(L) + idx + 1;
     lua_pushlightuserdata(L, const_cast<void*>(p)); // stack: ..., value, p
     lua_insert(L, -2);                              // stack: ..., p, value
     lua_rawset(L, idx);
-}
-#endif
-
-#if defined(LUA_VERSION_NUM) && LUA_VERSION_NUM > 501 && !defined(LUA_COMPAT_MODULE)
-#	define LUAAA_USE_NEW_MODULE_REGISTRY 1
 #else
-#	define LUAAA_USE_NEW_MODULE_REGISTRY 0
+    lua_rawsetp(L, idx, p);
+#endif
+}
+
+inline void LUAAA_pushglobaltable(lua_State * L) {
+#if !defined LUA_VERSION_NUM || LUA_VERSION_NUM <= 501
+    lua_pushvalue(L, LUA_GLOBALSINDEX);
+#else
+    lua_pushglobaltable(L);
+#endif
+}
+
+// The language level, also where MSVC keeps __cplusplus at 199711.
+#if defined(_MSVC_LANG) && _MSVC_LANG > __cplusplus
+#   define LUAAA_CPLUSPLUS _MSVC_LANG
+#else
+#   define LUAAA_CPLUSPLUS __cplusplus
 #endif
 
 // Portable thread_local. The raw function-pointer callback path stores its
@@ -130,6 +154,18 @@ inline void lua_rawsetp(lua_State * L, int idx, const void * p) {
 #include <utility>
 #include <new>          // placement new for storing callables in holder userdata
 
+// LuaJIT raises lua errors by unwinding the C++ stack with a FOREIGN exception,
+// which `catch (...)` intercepts. Where the C++ ABI lets us tell such an
+// exception from a real C++ one, keep the lua error as it is (see PushCppException).
+// (lua.h does not say whether it is LuaJIT's, so this is keyed on the 5.1 API;
+// PUC Lua 5.1 never throws a foreign exception, so the check is inert there.)
+#if (!defined(LUA_VERSION_NUM) || LUA_VERSION_NUM <= 501) && LUAAA_HAS_EXCEPTIONS && (defined(__GNUC__) || defined(__clang__)) && !defined(_MSC_VER)
+#   include <cxxabi.h>
+#   define LUAAA_FOREIGN_EXCEPTION() (abi::__cxa_current_exception_type() == nullptr)
+#else
+#   define LUAAA_FOREIGN_EXCEPTION() (false)
+#endif
+
 #if defined(_MSC_VER)
 #   define LUAAA_RTTI_CLASS_NAME(a) typeid(a).name() //vc always has this operator even if RTTI was disabled.
 #elif __GXX_RTTI
@@ -153,9 +189,11 @@ inline void lua_rawsetp(lua_State * L, int idx, const void * p) {
 // lua_tonumberx / lua_tointegerx (5.2+) are used by the numeric converters.
 // PUC Lua 5.1 lacks them (LuaJIT provides its own, so the test matrix never
 // noticed), and defining identically-named polyfills would collide with
-// LuaJIT's declarations -- route through these wrappers instead. On 5.1 the
-// integer wrapper clamps to lua_Integer's range (like LuaJIT does) instead of
-// relying on the implementation-defined double->integer cast.
+// LuaJIT's declarations -- route through these wrappers instead. Before 5.3
+// (no integer subtype: every number is a double) the integer wrapper clamps
+// to lua_Integer's range (like LuaJIT does) instead of relying on the
+// double->integer cast, which is undefined for a value out of range -- and
+// PUC 5.2's own lua_tointegerx does exactly that cast.
 inline lua_Number LUAAA_tonumberx(lua_State * L, int idx, int * isnum) {
 #if !defined LUA_VERSION_NUM || LUA_VERSION_NUM <= 501
     const lua_Number r = lua_tonumber(L, idx);
@@ -167,11 +205,11 @@ inline lua_Number LUAAA_tonumberx(lua_State * L, int idx, int * isnum) {
 }
 
 inline lua_Integer LUAAA_tointegerx(lua_State * L, int idx, int * isnum) {
-#if !defined LUA_VERSION_NUM || LUA_VERSION_NUM <= 501
-    const lua_Number n = lua_tonumber(L, idx);
-    if (isnum) *isnum = lua_isnumber(L, idx);
+#if !defined LUA_VERSION_NUM || LUA_VERSION_NUM < 503
+    const lua_Number n = LUAAA_tonumberx(L, idx, isnum);
     const lua_Number hi = (lua_Number)(std::numeric_limits<lua_Integer>::max)();
     const lua_Number lo = (lua_Number)(std::numeric_limits<lua_Integer>::min)();
+    if (n != n) return 0;                       // NaN: the cast below would be undefined
     if (n >= hi) return (std::numeric_limits<lua_Integer>::max)();
     if (n <= lo) return (std::numeric_limits<lua_Integer>::min)();
     return (lua_Integer)n;
@@ -279,16 +317,13 @@ inline void LUAAA_DUMP(lua_State * L, const char * name = "") {
 
 #if LUAAA_CHECK_CONSTRUCTOR_NAME_CONFLICT
 #   define LUAAA_REPORT_CTOR_NAME_CONFLICT(ctorName) { \
-        lua_getglobal(m_state, (LuaClass<TCLASS>::klassName(m_state))); \
-        if (!lua_isnil(m_state, -1)) { \
-            lua_pushstring(m_state, ctorName); \
-            lua_gettable(m_state, -2); \
-            if (!lua_isnil(m_state, -1)) { \
-                printf("Error: LuaClass<%s>::ctor has duplicated name:`%s`\n", LuaClass<TCLASS>::klassName(m_state), ctorName);\
-            } \
-            lua_pop(m_state, 1); \
+        ::LUAAA_NS::luaaa_detail::push_named_table(m_state, klassName(m_state)); \
+        lua_pushstring(m_state, ctorName); \
+        lua_rawget(m_state, -2); \
+        if (!lua_isnil(m_state, -1) && lua_tocfunction(m_state, -1) != &::LUAAA_NS::luaaa_detail::overload_dispatch) { \
+            printf("Error: LuaClass<%s>::ctor has duplicated name:`%s`\n", klassName(m_state), ctorName);\
         } \
-        lua_pop(m_state, 1); \
+        lua_pop(m_state, 2); \
     }
 #else
 #   define LUAAA_REPORT_CTOR_NAME_CONFLICT(ctorName)
@@ -465,6 +500,11 @@ namespace LUAAA_NS
     //    left stale by a longjmp that skipped a boundary's cleanup can never
     //    match a different running function.
     namespace luaaa_detail {
+        inline int AbsIndex(lua_State* L, int idx)
+        {
+            return (idx < 0 && idx > LUA_REGISTRYINDEX) ? (lua_gettop(L) + idx + 1) : idx;
+        }
+
 #if LUAAA_HAS_EXCEPTIONS
         struct ConversionError
         {
@@ -499,15 +539,17 @@ namespace LUAAA_NS
             return key != nullptr && lua_touserdata(L, lua_upvalueindex(1)) == key;
         }
 
-        inline int AbsIndex(lua_State* L, int idx)
-        {
-            return (idx < 0 && idx > LUA_REGISTRYINDEX) ? (lua_gettop(L) + idx + 1) : idx;
-        }
-
         // Push "<where>: luaaa: <context> failed: <what>" for the exception being
         // handled; returns its stack index. Call from inside a catch block only.
         inline int PushCppException(lua_State* L, const char* context)
         {
+            if (LUAAA_FOREIGN_EXCEPTION() && lua_gettop(L) > 0)
+            {
+                // Not a C++ exception but a lua error in transit (LuaJIT): its
+                // error value is on top of the stack -- pass it on unchanged
+                // instead of rewording it as an "unknown C++ exception".
+                return lua_gettop(L);
+            }
             luaL_where(L, 1);
             try {
                 throw;   // rethrow the current exception to inspect it
@@ -600,6 +642,22 @@ namespace LUAAA_NS
             std::abort();   // unreachable: luaL_error does not return
         }
 
+        // The value at idx is not a `tname` object: raise what luaL_checkudata
+        // would ("bad argument #2 to 'f' (Cat expected, got nil)").
+        [[noreturn]] inline void conv_udata_error(lua_State* L, int idx, const char* tname)
+        {
+#if LUAAA_HAS_EXCEPTIONS
+            if (InBoundary(L))
+            {
+                const ConversionError e = { CONV_UDATA, AbsIndex(L, idx), 0, tname };
+                throw e;
+            }
+#endif
+            luaL_checkudata(L, AbsIndex(L, idx), tname);
+            luaL_error(L, "%s expected", tname);    // the check unexpectedly passed
+            std::abort();   // unreachable
+        }
+
         inline void* conv_check_udata(lua_State* L, int idx, const char* tname)
         {
 #if LUAAA_HAS_EXCEPTIONS
@@ -675,9 +733,200 @@ namespace LUAAA_NS
     // LuaStack<std::function<...>>::put, so it must be declared before LuaStack.
     template<typename TRET, typename ...ARGS>
     lua_CFunction NonMemberFunctionCaller(const std::function<TRET(ARGS...)>& func);
-    template<typename ...ARGS>
-    lua_CFunction NonMemberFunctionCaller(const std::function<void(ARGS...)>& func);
 #endif
+
+    namespace luaaa_detail {
+        // Push a userdata holding a copy of `f` (collected with ~F, see AttachHolderFinalizer).
+        template <typename F>
+        inline void push_holder(lua_State* L, const F& f)
+        {
+            F* p = (F*)lua_newuserdata(L, sizeof(F));
+            new (p) F(f);
+            AttachHolderFinalizer<F>(L);
+        }
+
+        inline int overload_dispatch(lua_State* L);
+        inline void push_named_table(lua_State* L, const char* name);
+    }
+
+    //========================================================
+    // object model
+    //========================================================
+    // Every bound C++ object lives in Lua as a full userdata that starts with
+    // this block. It is the same for every class, so one object can be viewed
+    // as any of its bound base classes, and __gc needs no per-class code.
+    namespace luaaa_detail {
+        struct UserData
+        {
+            void* obj;                  // the object, as the class named by the userdata's metatable; nullptr once finalized
+            void (*dtor)(UserData*);    // destroys / releases obj; nullptr for a non-owning alias
+            void (*free_func)();        // custom deleter, type-erased (see LuaClass::ctor(name, spawner, deleter))
+            const void* holderKind;     // nullptr, or the tag of the smart pointer kept in `holder`
+            void* holder;               // the smart pointer that owns obj (stored inside this userdata)
+        };
+
+        // Integer slots of a class metatable (invisible to Lua's metamethod lookup).
+        enum { MT_METHODS = 1, MT_GETTERS = 2, MT_SETTERS = 3, MT_BASES = 4 };
+
+        // Marks a metatable as one of ours (any class). A userdata is read as a
+        // UserData only if its metatable carries this.
+        inline const void* ClassMetaTag() { static char k = 0; return &k; }
+        inline const void* SharedHolderTag() { static char k = 0; return &k; }
+        template<typename PTR> struct UniqueHolderTag { static const void* key() { static char k = 0; return &k; } };
+
+        typedef void* (*UpcastFn)(void*);
+
+        inline UserData* new_userdata(lua_State* L, size_t extra)
+        {
+            UserData* u = (UserData*)lua_newuserdata(L, sizeof(UserData) + extra);
+            u->obj = nullptr;
+            u->dtor = nullptr;
+            u->free_func = nullptr;
+            u->holderKind = nullptr;
+            u->holder = nullptr;
+            return u;
+        }
+
+        // First address at or after the end of the UserData block that is aligned for `align`.
+        inline void* payload(UserData* u, size_t align)
+        {
+            return (void*)((reinterpret_cast<uintptr_t>(u + 1) + (align - 1)) & ~(uintptr_t)(align - 1));
+        }
+
+        template<typename T>
+        inline void destroy_in_place(UserData* u) { static_cast<T*>(u->obj)->~T(); }
+
+        // Is the class whose metatable is at `mt` (absolute index) the class
+        // `typeKey` names, or derived from it? On success `p` -- a pointer to
+        // the object as mt's class -- is adjusted to point at that base (pass
+        // nullptr to only ask the question).
+        inline bool upcast(lua_State* L, int mt, const void* typeKey, void** p, int depth)
+        {
+            LUAAA_rawgetp(L, mt, typeKey);
+            const bool same = (lua_touserdata(L, -1) == typeKey);
+            lua_pop(L, 1);
+            if (same)
+            {
+                return true;
+            }
+            if (depth > 16 || !lua_checkstack(L, 4))
+            {
+                return false;
+            }
+            lua_rawgeti(L, mt, MT_BASES);
+            if (!lua_istable(L, -1))
+            {
+                lua_pop(L, 1);
+                return false;
+            }
+            const int bases = lua_gettop(L);        // { baseMetatable, caster, baseMetatable, caster, ... }
+            bool found = false;
+            for (int i = 1; !found; i += 2)
+            {
+                lua_rawgeti(L, bases, i);
+                if (!lua_istable(L, -1))
+                {
+                    lua_pop(L, 1);
+                    break;
+                }
+                lua_rawgeti(L, bases, i + 1);
+                const UpcastFn* fn = (const UpcastFn*)lua_touserdata(L, -1);
+                lua_pop(L, 1);
+                void* q = p ? (fn ? (*fn)(*p) : *p) : nullptr;
+                if (upcast(L, lua_gettop(L), typeKey, p ? &q : nullptr, depth + 1))
+                {
+                    if (p) { *p = q; }
+                    found = true;
+                }
+                lua_pop(L, 1);
+            }
+            lua_pop(L, 1);
+            return found;
+        }
+
+        enum { OBJ_MISMATCH = 0, OBJ_FINALIZED = 1 };
+
+        // The value at idx as an object of the class `typeKey` names, or nullptr.
+        // Accepts a bound object of that class or of a class derived from it,
+        // and a lua-side object made by luaaa:extend (a table keeping the bound
+        // object under "@"). Never raises and leaves the stack as it found it --
+        // a residue would poison an enclosing lua_next loop.
+        // The class is recognized by the type tag in the metatable, which costs
+        // one raw lookup; no class name is fetched or compared.
+        inline void* to_object(lua_State* L, int idx, const void* typeKey, int* why = nullptr, UserData** owner = nullptr)
+        {
+            if (why) { *why = OBJ_MISMATCH; }
+            idx = AbsIndex(L, idx);
+            const int t = lua_type(L, idx);
+            if (t == LUA_TTABLE)
+            {
+                if (!lua_checkstack(L, 2))
+                {
+                    return nullptr;
+                }
+                lua_pushlstring(L, "@", 1);
+                lua_rawget(L, idx);
+                void* r = (lua_type(L, -1) == LUA_TUSERDATA) ? to_object(L, lua_gettop(L), typeKey, why, owner) : nullptr;
+                lua_pop(L, 1);
+                return r;
+            }
+            if (t != LUA_TUSERDATA || !lua_checkstack(L, 3) || !lua_getmetatable(L, idx))
+            {
+                return nullptr;
+            }
+            const int mt = lua_gettop(L);
+            UserData* u = (UserData*)lua_touserdata(L, idx);
+            void* p = nullptr;
+            LUAAA_rawgetp(L, mt, typeKey);
+            bool ok = (lua_touserdata(L, -1) == typeKey);       // exactly this class: the usual case
+            lua_pop(L, 1);
+            if (ok)
+            {
+                p = u->obj;
+            }
+            else
+            {
+                LUAAA_rawgetp(L, mt, ClassMetaTag());
+                const bool ours = (lua_toboolean(L, -1) != 0);
+                lua_pop(L, 1);
+                if (ours)
+                {
+                    p = u->obj;                     // a derived class? then adjust the pointer
+                    ok = upcast(L, mt, typeKey, p ? &p : nullptr, 0);
+                }
+            }
+            lua_pop(L, 1);
+            if (!ok)
+            {
+                return nullptr;
+            }
+            if (p == nullptr)                       // the right class, but already finalized
+            {
+                if (why) { *why = OBJ_FINALIZED; }
+                return nullptr;
+            }
+            if (owner) { *owner = u; }
+            return p;
+        }
+
+        // Report the value at idx as not being a `kname` object. Never returns.
+        [[noreturn]] inline void bad_object(lua_State* L, int idx, const char* kname, int why, const char* cppName)
+        {
+            if (why == OBJ_FINALIZED)
+            {
+                conv_arg_error(L, 1, "invalid user data");
+            }
+            if (kname == nullptr)
+            {
+                if (lua_checkstack(L, 1))
+                {
+                    conv_arg_error(L, 1, lua_pushfstring(L, "cpp class `%s` not export", cppName));
+                }
+                conv_arg_error(L, 1, "cpp class not export");
+            }
+            conv_udata_error(L, idx, kname);
+        }
+    }
 
     //========================================================
     // Lua stack operator
@@ -690,99 +939,69 @@ namespace LUAAA_NS
 
         inline static T& get(lua_State * state, int idx)
         {
-#if LUAAA_WITHOUT_CPP_STDLIB
-            if (!(LuaClass<T>::klassName(state) != nullptr)) { luaaa_detail::conv_arg_error(state, 1, "cpp class not export"); }
-#else
-            if (!(LuaClass<T>::klassName(state) != nullptr)) { luaaa_detail::conv_arg_error(state, 1, (std::string("cpp class `") + LUAAA_RTTI_CLASS_NAME(T) + "` not export").c_str()); }
-#endif
-            if (lua_istable(state, idx)) {
-                // A lua-side object made by luaaa:extend: a table that keeps the
-                // bound C++ object under "@", and whose metatable carries this
-                // class's type tag (the class metatable itself, or the per-subclass
-                // copy luaaa:extend derives from it). The tag is checked instead
-                // of the metatable's identity or __name so the test is the same on
-                // every Lua version and holds for those derived copies.
-                // Every branch below leaves the stack exactly as it found it: a
-                // residue here would poison an enclosing lua_next loop (e.g. a
-                // map of extend-derived tables) -- lua_next pops whatever is
-                // on top as its cursor key.
-                if (lua_getmetatable(state, idx)) {                             // [mt]
-                    lua_rawgetp(state, lua_gettop(state), &LuaClass<T>::s_typeKey);   // [mt, tag]
-                    const bool tagged = (lua_touserdata(state, -1) == (void*)&LuaClass<T>::s_typeKey);
-                    lua_pop(state, 2);                                          // []
-                    if (tagged) {
-                        lua_pushstring(state, "@");
-                        lua_rawget(state, idx);                                 // ["@" value]
-                        if (lua_type(state, -1) == LUA_TUSERDATA) {
-                            T ** t = (T**)luaaa_detail::conv_check_udata(state, -1, LuaClass<T>::klassName(state));
-                            if (!(t != nullptr && *t != nullptr)) { luaaa_detail::conv_arg_error(state, 1, "invalid user data"); }
-                            T& ref = **t;
-                            lua_pop(state, 1);
-                            return ref;
-                        }
-                        lua_pop(state, 1);                                      // "@" value
-                    }
-                }
+            int why = 0;
+            void* p = luaaa_detail::to_object(state, idx, &LuaClass<T>::s_typeKey, &why);
+            if (p == nullptr)
+            {
+                luaaa_detail::bad_object(state, idx, LuaClass<T>::klassName(state), why, LUAAA_RTTI_CLASS_NAME(T));
             }
-            T ** t = (T**)luaaa_detail::conv_check_udata(state, idx, LuaClass<T>::klassName(state));
-            if (!(t != nullptr && *t != nullptr)) { luaaa_detail::conv_arg_error(state, 1, "invalid user data"); }
-            return (**t);
+            return *static_cast<T*>(p);
         }
 
         // A returned C++ object is wrapped as a FULL userdata carrying the class
         // metatable, so methods stay callable on it and the value is type-checked
-        // on the way back in (a bare lightuserdata has neither). Two flavors:
-        //   put(L, T*)        -- non-owning alias: Lua never deletes it (dtor=nullptr)
+        // on the way back in (a bare lightuserdata has neither). Three flavors:
+        //   put(L, T*)        -- non-owning alias: Lua never deletes it
         //   put(L, const T&)  -- owning copy: constructed in place, destroyed by __gc
+        //   put(L, T&&)       -- owning, MOVED in: the way a move-only type is returned
         // A pointer whose class is not bound in this state degrades to a plain
         // lightuserdata (the legacy opaque-handle pattern); a by-value object
         // cannot be represented that way without dangling, so it raises instead.
         inline static void put(lua_State * L, T * t)
         {
             if (!t) { lua_pushnil(L); return; }
-            const char * kname = LuaClass<T>::klassName(L);
-            if (kname)
-            {
-                auto uData = (typename LuaClass<T>::UserDataDetail*)lua_newuserdata(L, sizeof(typename LuaClass<T>::UserDataDetail));
-                uData->obj = t;
-                uData->dtor = nullptr;          // non-owning alias
-                uData->free_func = nullptr;
-                luaL_setmetatable(L, kname);
-            }
-            else
+            if (!LuaClass<T>::pushMetatable(L))
             {
                 lua_pushlightuserdata(L, t);
+                return;
             }
+            luaaa_detail::UserData* uData = luaaa_detail::new_userdata(L, 0);
+            uData->obj = t;                 // non-owning alias: no dtor
+            lua_insert(L, -2);
+            lua_setmetatable(L, -2);
         }
 
         inline static void put(lua_State * L, const T & t)
         {
-            const char * kname = LuaClass<T>::klassName(L);
-#if LUAAA_WITHOUT_CPP_STDLIB
-            luaL_argcheck(L, kname != nullptr, 1, "cpp class not export");
-#else
-            luaL_argcheck(L, kname != nullptr, 1, (std::string("cpp class `") + LUAAA_RTTI_CLASS_NAME(T) + "` not export").c_str());
-#endif
-            struct Holder {
-                static int f_dtor(typename LuaClass<T>::UserDataDetail* uData) {
-                    if (uData && uData->obj) { (uData->obj)->~T(); }
-                    return 0;
-                }
-            };
+            emplace(L, t);
+        }
+
+        inline static void put(lua_State * L, T && t)
+        {
+            emplace(L, std::move(t));
+        }
+
+    private:
+        template <typename U>
+        inline static void emplace(lua_State * L, U && u)
+        {
+            if (!LuaClass<T>::pushMetatable(L))
+            {
+                luaL_argerror(L, 1, lua_pushfstring(L, "cpp class `%s` not export", LUAAA_RTTI_CLASS_NAME(T)));
+            }
             // Extra alignof(T)-1 bytes so the in-place object can be aligned even
             // when alignof(T) exceeds the base block's alignment.
-            auto uData = (typename LuaClass<T>::UserDataDetail*)lua_newuserdata(L, sizeof(typename LuaClass<T>::UserDataDetail) + (alignof(T) - 1) + sizeof(T));
-            const uintptr_t addr = (reinterpret_cast<uintptr_t>(uData + 1) + (alignof(T) - 1)) & ~(uintptr_t)(alignof(T) - 1);
+            luaaa_detail::UserData* uData = luaaa_detail::new_userdata(L, (alignof(T) - 1) + sizeof(T));
             T* obj = nullptr;
             LUAAA_TRY
             {
-                obj = new ((void*)addr) T(t);   // owning copy
+                obj = new (luaaa_detail::payload(uData, alignof(T))) T(std::forward<U>(u));
             }
             LUAAA_CATCH(L, "copy object into lua")
             uData->obj = obj;
-            uData->dtor = Holder::f_dtor;
-            uData->free_func = nullptr;
-            luaL_setmetatable(L, kname);
+            uData->dtor = &luaaa_detail::destroy_in_place<T>;
+            lua_insert(L, -2);
+            lua_setmetatable(L, -2);
         }
     };
 
@@ -856,51 +1075,48 @@ namespace LUAAA_NS
 
     template <typename T> struct LuaStack<T*>
     {
+        // Accepts, like a `T&` parameter does: a bound object of class T or of
+        // a class derived from it, and a lua-side (luaaa:extend) object. Also
+        // a light userdata (an opaque handle, taken on trust), and -- only with
+        // LUAAA_NIL_AS_NULLPTR -- nil or a missing argument as nullptr.
         inline static T * get(lua_State * state, int idx)
         {
             // The pointee's cv-qualifiers mean nothing to the Lua side: an object
-            // bound as Foo must be passable to a const Foo* parameter. Normalize
-            // before the klassName lookup (only LuaClass<Foo> is ever registered).
+            // bound as Foo must be passable to a const Foo* parameter.
             typedef typename std::remove_cv<T>::type MT;
-            if (lua_islightuserdata(state, idx))
+            const int t = lua_type(state, idx);
+            if (t == LUA_TLIGHTUSERDATA)
             {
-                T * t = (T*)lua_touserdata(state, idx);
-                return t;
+                return (T*)lua_touserdata(state, idx);
             }
-            else if (lua_isuserdata(state, idx))
+#if LUAAA_NIL_AS_NULLPTR
+            if (t == LUA_TNIL || t == LUA_TNONE)
             {
-                if (LuaClass<MT*>::klassName(state) != nullptr)
-                {
-                    T ** t = (T**)luaaa_detail::conv_check_udata(state, idx, LuaClass<MT*>::klassName(state));
-                    if (!(t != nullptr && *t != nullptr)) { luaaa_detail::conv_arg_error(state, 1, "invalid user data"); }
-                    return *t;
-                }
-                if (LuaClass<MT>::klassName(state) != nullptr)
-                {
-                    T ** t = (T**)luaaa_detail::conv_check_udata(state, idx, LuaClass<MT>::klassName(state));
-                    if (!(t != nullptr && *t != nullptr)) { luaaa_detail::conv_arg_error(state, 1, "invalid user data"); }
-                    return *t;
-                }
+                return nullptr;
             }
-            // The argument is neither a bound userdata nor a light userdata (e.g. nil,
-            // a number, a string, a table). Returning nullptr silently would hand the
-            // C++ side a null pointer that a subsequent dereference would crash on.
-            // Raise a clear Lua argument error instead, mirroring LuaStack<T>::get.
-            // For a bound class, word it like luaL_checkudata does -- the lua
-            // name of the class and the offending argument's position; the
-            // (mangled) C++ type name is only a fallback for unbound pointees.
-            const int arg = (idx > 0) ? idx : 1;
-            const char * kname = LuaClass<MT>::klassName(state);
-            if (kname != nullptr)
-            {
-                luaaa_detail::conv_arg_error(state, arg, lua_pushfstring(state, "%s expected, got %s", kname, luaL_typename(state, idx)));
-            }
-#if LUAAA_WITHOUT_CPP_STDLIB
-            luaaa_detail::conv_arg_error(state, arg, "cpp pointer expected");
-#else
-            luaaa_detail::conv_arg_error(state, arg, (std::string("cpp pointer `") + LUAAA_RTTI_CLASS_NAME(T*) + "` expected").c_str());
 #endif
-            return nullptr;
+            int why = 0;
+            void* p = luaaa_detail::to_object(state, idx, &LuaClass<MT>::s_typeKey, &why);
+            if (p != nullptr)
+            {
+                return static_cast<MT*>(p);
+            }
+            // Anything else (nil, a number, a string, an unrelated object):
+            // raise instead of handing the C++ side a null pointer to crash on.
+            // For a bound class the message is worded like luaL_checkudata's --
+            // the lua name of the class and the argument's position; the
+            // (mangled) C++ type name is only a fallback for unbound pointees.
+            const char * kname = LuaClass<MT>::klassName(state);
+            if (kname != nullptr || why == luaaa_detail::OBJ_FINALIZED)
+            {
+                luaaa_detail::bad_object(state, idx, kname, why, LUAAA_RTTI_CLASS_NAME(T));
+            }
+            const int arg = (idx > 0) ? idx : 1;
+            if (lua_checkstack(state, 1))
+            {
+                luaaa_detail::conv_arg_error(state, arg, lua_pushfstring(state, "cpp pointer `%s` expected", LUAAA_RTTI_CLASS_NAME(T*)));
+            }
+            luaaa_detail::conv_arg_error(state, arg, "cpp pointer expected");
         }
 
         inline static void put(lua_State * L, T * t)
@@ -908,16 +1124,8 @@ namespace LUAAA_NS
             // Wrap pointers of bound classes as typed, non-owning full userdata
             // (methods stay callable, type is checked on the way back in); fall
             // back to a plain lightuserdata for unbound pointee types.
-            if (!t) { lua_pushnil(L); return; }
             typedef typename std::remove_cv<T>::type MT;
-            if (LuaClass<MT>::klassName(L))
-            {
-                LuaStack<MT>::put(L, const_cast<MT*>(t));
-            }
-            else
-            {
-                lua_pushlightuserdata(L, const_cast<MT*>(t));
-            }
+            LuaStack<MT>::put(L, const_cast<MT*>(t));
         }
     };
 
@@ -1060,6 +1268,37 @@ namespace LUAAA_NS
     //   not fit lua_Integer's range raises luaL_error instead of being silently
     //   narrowed (wrapping). Values Lua's number type cannot represent exactly
     //   (e.g. 64-bit ints when lua_Number is double) remain an inherent Lua limit.
+    namespace luaaa_detail {
+        // Does an integer of a type WIDER than lua_Integer fit into it?
+        // (Narrower and equally wide types never get here -- see put below.)
+        template<typename T>
+        inline bool fits_wide(T v, std::true_type /*signed*/)
+        {
+            return v >= static_cast<T>((std::numeric_limits<lua_Integer>::min)())
+                && v <= static_cast<T>((std::numeric_limits<lua_Integer>::max)());
+        }
+        template<typename T>
+        inline bool fits_wide(T v, std::false_type /*unsigned*/)
+        {
+            return v <= static_cast<T>((std::numeric_limits<lua_Integer>::max)());
+        }
+        template<typename T>
+        inline bool fits_lua_integer(T v, std::true_type /*wider*/)
+        {
+            return fits_wide(v, std::integral_constant<bool, std::is_signed<T>::value>());
+        }
+        template<typename T>
+        inline bool fits_lua_integer(T, std::false_type)
+        {
+            return true;
+        }
+        template<typename T>
+        inline bool fits_lua_integer(T v)
+        {
+            return fits_lua_integer(v, std::integral_constant<bool, (sizeof(T) > sizeof(lua_Integer))>());
+        }
+    }
+
     template<typename T>
     struct LuaStack<T, typename std::enable_if<
         std::is_integral<T>::value
@@ -1105,16 +1344,23 @@ namespace LUAAA_NS
 
         inline static void put(lua_State * L, const T & t)
         {
-            // Mirror the floating-point specialization: refuse to narrow a value
-            // that is out of lua_Integer's representable range. Widening to long
-            // double before comparing keeps the comparison itself UB-free.
-            const long double lv = static_cast<long double>(t);
-            const long double lo = static_cast<long double>(std::numeric_limits<lua_Integer>::min());
-            const long double hi = static_cast<long double>(std::numeric_limits<lua_Integer>::max());
-            if (lv < lo || lv > hi)
+            // The mirror image of get, decided with INTEGER comparisons only (a
+            // detour through floating point rounds INT64_MAX up to 2^63 where
+            // long double is just double -- arm64, MSVC -- which made
+            // uint64_t(1) << 63 pass and wrap while UINT64_MAX was refused):
+            //   * a type narrower than lua_Integer, or a signed one as wide,
+            //     always fits;
+            //   * an UNSIGNED type as wide as lua_Integer travels as its bit
+            //     pattern, exactly as get accepts it: UINT64_MAX arrives as
+            //     -1 and -1 comes back as UINT64_MAX, so every value round-trips;
+            //   * only a type WIDER than lua_Integer can overflow, and then
+            //     raises (LUAAA_CHECK_INTEGER_RANGE=0: wraps silently).
+#if LUAAA_CHECK_INTEGER_RANGE
+            if (!luaaa_detail::fits_lua_integer(t))
             {
                 luaL_error(L, "number overflow: integer value out of lua_Integer range");
             }
+#endif
             lua_pushinteger(L, static_cast<lua_Integer>(t));
         }
     };
@@ -1170,17 +1416,35 @@ namespace LUAAA_NS
     };
 
 #if !LUAAA_WITHOUT_CPP_STDLIB
+    // std::string carries its length in both directions, so a string with
+    // embedded NUL bytes ("a\0b") survives the trip. (`const char*` cannot:
+    // a C string ends at its first NUL.)
     template<>
     struct LuaStack<std::string>
     {
         inline static std::string get(lua_State * L, int idx)
         {
-            return LuaStack<const char *>::get(L, idx);
+            switch (lua_type(L, idx))
+            {
+            case LUA_TBOOLEAN:
+                return (lua_toboolean(L, idx) ? "true" : "false");
+            case LUA_TNUMBER:
+            case LUA_TSTRING:
+            {
+                size_t len = 0;
+                const char * s = lua_tolstring(L, idx, &len);
+                return std::string(s, len);
+            }
+            default:
+                luaaa_detail::conv_check_type(L, idx, LUA_TSTRING);
+                break;
+            }
+            return std::string();
         }
 
         inline static void put(lua_State * L, const std::string& s)
         {
-            LuaStack<const char *>::put(L, s.c_str());
+            lua_pushlstring(L, s.data(), s.size());
         }
     };
 #endif
@@ -1203,27 +1467,83 @@ namespace LUAAA_NS
         }
     };
 
-    // push ret data to stack
+    // push ret data to stack. The value is forwarded, so a returned temporary
+    // is MOVED into Lua -- a move-only class can be returned by value.
     template <typename T>
-    inline void LuaStackReturn(lua_State * L, T t)
+    inline void LuaStackReturn(lua_State * L, T && t)
     {
         lua_settop(L, 0);
-        LuaStack<T>::put(L, t);
+        LuaStack<T>::put(L, std::forward<T>(t));
     }
 
-    // A lua_pcall inside a C++ callback failed. We must NOT lua_error() here:
-    // that longjmps across the intervening C++ stack frames (skipping their
-    // destructors -> UB) and, if the callback was invoked outside any pcall
-    // (e.g. from another thread or from pure C++), there is no setjmp target so
-    // Lua would panic/abort. Instead report the message (debug builds only) and
-    // pop it so the stack stays balanced; the caller returns a default value.
+    //========================================================
+    // lua callback error handler
+    //========================================================
+    // A lua function that C++ calls back (a std::function / function pointer
+    // parameter) may fail: the script raises, or its result cannot be converted.
+    // The callback then returns RET() to its C++ caller -- raising a lua error
+    // there would longjmp across the caller's C++ frames. To learn about such
+    // failures, register a handler for the lua_State (one per VM; nullptr
+    // removes it):
+    //
+    //     luaaa::setCallbackErrorHandler(L, [](lua_State*, const char* msg, void*) {
+    //         fprintf(stderr, "lua callback failed: %s\n", msg);
+    //     });
+    //
+    // The handler runs on the thread that invoked the callback, after the
+    // failed protected call has been left, so it may also THROW a C++ exception
+    // to make the failure visible to the code that invoked the callback.
+    typedef void (*CallbackErrorHandler)(lua_State* L, const char* message, void* userdata);
+
+    namespace luaaa_detail {
+        struct CallbackErrorHook { CallbackErrorHandler fn; void* userdata; };
+        inline const void* CallbackErrorHookKey() { static char k = 0; return &k; }
+    }
+
+    inline void setCallbackErrorHandler(lua_State * L, CallbackErrorHandler handler, void * userdata = nullptr)
+    {
+        if (handler)
+        {
+            luaaa_detail::CallbackErrorHook* hook = (luaaa_detail::CallbackErrorHook*)lua_newuserdata(L, sizeof(luaaa_detail::CallbackErrorHook));
+            hook->fn = handler;
+            hook->userdata = userdata;
+        }
+        else
+        {
+            lua_pushnil(L);
+        }
+        LUAAA_rawsetp(L, LUA_REGISTRYINDEX, luaaa_detail::CallbackErrorHookKey());
+    }
+
+    // A protected call made for a C++ callback failed; the error value is on
+    // top of the stack. We must NOT lua_error() here: that longjmps across the
+    // intervening C++ stack frames (skipping their destructors -> UB) and, if
+    // the callback was invoked outside any pcall (e.g. from another thread or
+    // from pure C++), there is no setjmp target so Lua would panic/abort.
+    // Instead hand the message to the registered handler (if any) and pop it,
+    // so the stack stays balanced; the callback returns a default value.
     inline void HandleCallbackError(lua_State * L)
     {
-#if LUAAA_DEBUG
+        struct PopGuard
+        {
+            lua_State* state;
+            ~PopGuard() { lua_pop(state, 1); }     // also when the handler throws
+        } guard = { L };
         const char * msg = lua_tostring(L, -1);
-        fprintf(stderr, "luaaa: error in lua callback: %s\n", msg ? msg : "?");
+        if (!msg) { msg = "(error object is not a string)"; }
+#if LUAAA_DEBUG
+        fprintf(stderr, "luaaa: error in lua callback: %s\n", msg);
 #endif
-        lua_pop(L, 1);   // discard the error message left by lua_pcall
+        if (lua_checkstack(L, 1))
+        {
+            LUAAA_rawgetp(L, LUA_REGISTRYINDEX, luaaa_detail::CallbackErrorHookKey());
+            const luaaa_detail::CallbackErrorHook* hook = (const luaaa_detail::CallbackErrorHook*)lua_touserdata(L, -1);
+            lua_pop(L, 1);
+            if (hook && hook->fn)
+            {
+                hook->fn(L, msg, hook->userdata);
+            }
+        }
     }
 
     //========================================================
@@ -1272,11 +1592,11 @@ namespace LUAAA_NS
             static char s_mainThreadKey = 0;
             if (lua_pushthread(L))                  // L is the main thread: remember it
             {
-                lua_rawsetp(L, LUA_REGISTRYINDEX, &s_mainThreadKey);
+                LUAAA_rawsetp(L, LUA_REGISTRYINDEX, &s_mainThreadKey);
                 return L;
             }
             lua_pop(L, 1);
-            lua_rawgetp(L, LUA_REGISTRYINDEX, &s_mainThreadKey);
+            LUAAA_rawgetp(L, LUA_REGISTRYINDEX, &s_mainThreadKey);
             lua_State* mainL = lua_tothread(L, -1);
             lua_pop(L, 1);
             return mainL ? mainL : L;
@@ -1296,6 +1616,24 @@ namespace LUAAA_NS
         {
             return const_cast<void*>(static_cast<const volatile void*>(&t));
         }
+
+        // Where a callback keeps its result while the protected call runs
+        // (nothing for a void callback).
+        template<typename RET>
+        struct CallbackResult
+        {
+            RET value;
+            CallbackResult() : value() {}
+            void* addr() { return erase_addr(value); }
+            RET take() { return std::move(value); }
+        };
+
+        template<>
+        struct CallbackResult<void>
+        {
+            void* addr() { return nullptr; }
+            void take() {}
+        };
 
         // Run `fn(ctx)` under a protected call on L. Returns false if it raised
         // (the error has been reported and popped; the stack is left balanced).
@@ -1331,7 +1669,8 @@ namespace LUAAA_NS
             lua_rawgeti(L, LUA_REGISTRYINDEX, ctx->ref);
             LUAAA_TRY
             {
-                int initParams[] = { (LuaStack<ARGS>::put(L, *static_cast<typename std::remove_reference<ARGS>::type*>(ctx->argv[Ns])), 0)..., 0 }; (void)initParams;
+                // a by-value parameter is the callback's own copy: move it into lua
+                int initParams[] = { (LuaStack<ARGS>::put(L, static_cast<ARGS&&>(*static_cast<typename std::remove_reference<ARGS>::type*>(ctx->argv[Ns]))), 0)..., 0 }; (void)initParams;
             }
             LUAAA_CATCH(L, "lua callback argument")
             lua_call(L, (int)sizeof...(ARGS), nresults);
@@ -1401,14 +1740,14 @@ namespace LUAAA_NS
             { \
                 static RET CALLCONV f_callback(ARGS... args) \
                 { \
-                    RET result = RET(); \
+                    luaaa_detail::CallbackResult<RET> result; \
                     if (cacheLuaState) \
                     { \
                         void* argv[] = { luaaa_detail::erase_addr(args)..., nullptr }; \
-                        luaaa_detail::CallbackContext ctx = { cacheLuaFuncId, argv, luaaa_detail::erase_addr(result) }; \
+                        luaaa_detail::CallbackContext ctx = { cacheLuaFuncId, argv, result.addr() }; \
                         luaaa_detail::RunProtected(cacheLuaState, &luaaa_detail::CallbackRunner<RET, ARGS...>::Run, &ctx); \
                     } \
-                    return result; \
+                    return result.take(); \
                 } \
             }; \
             if (lua_isfunction(L, idx)) \
@@ -1424,48 +1763,7 @@ namespace LUAAA_NS
         { \
             /* A bare lua_pushcfunction cannot carry f; the Invoke wrapper reads \
                the callable from upvalue(1), so store it in a holder userdata. */ \
-            FTYPE* funPtr = (FTYPE*)lua_newuserdata(L, sizeof(FTYPE)); \
-            new (funPtr) FTYPE(f); \
-            AttachHolderFinalizer<FTYPE>(L); \
-            lua_pushcclosure(L, NonMemberFunctionCaller(f), 1); \
-        } \
-    }; \
-    template<typename ...ARGS> \
-    struct LuaStack<void(CALLCONV*)(ARGS...)> \
-    { \
-        typedef void(CALLCONV*FTYPE)(ARGS...); \
-        inline static FTYPE get(lua_State * L, int idx) \
-        { \
-            LUAAA_THREAD_LOCAL lua_State * cacheLuaState = nullptr; \
-            LUAAA_THREAD_LOCAL int cacheLuaFuncId = 0; \
-            struct HelperClass \
-            { \
-                static void CALLCONV f_callback(ARGS... args) \
-                { \
-                    if (cacheLuaState) \
-                    { \
-                        void* argv[] = { luaaa_detail::erase_addr(args)..., nullptr }; \
-                        luaaa_detail::CallbackContext ctx = { cacheLuaFuncId, argv, nullptr }; \
-                        luaaa_detail::RunProtected(cacheLuaState, &luaaa_detail::CallbackRunner<void, ARGS...>::Run, &ctx); \
-                    } \
-                } \
-            }; \
-            if (lua_isfunction(L, idx)) \
-            { \
-                cacheLuaState = luaaa_detail::MainThread(L); \
-                lua_pushvalue(L, idx); \
-                cacheLuaFuncId = luaL_ref(L, LUA_REGISTRYINDEX); \
-                return HelperClass::f_callback; \
-            } \
-            return nullptr; \
-        } \
-        inline static void put(lua_State * L, FTYPE f) \
-        { \
-            /* A bare lua_pushcfunction cannot carry f; the Invoke wrapper reads \
-               the callable from upvalue(1), so store it in a holder userdata. */ \
-            FTYPE* funPtr = (FTYPE*)lua_newuserdata(L, sizeof(FTYPE)); \
-            new (funPtr) FTYPE(f); \
-            AttachHolderFinalizer<FTYPE>(L); \
+            luaaa_detail::push_holder<FTYPE>(L, f); \
             lua_pushcclosure(L, NonMemberFunctionCaller(f), 1); \
         } \
     };
@@ -1497,53 +1795,18 @@ namespace LUAAA_NS
                 luaL_unref(mainL, LUA_REGISTRYINDEX, ref);
             });
             return [mainL, ref, guard](ARGS... args) -> RET {
-                RET result = RET();
+                luaaa_detail::CallbackResult<RET> result;
                 void* argv[] = { luaaa_detail::erase_addr(args)..., nullptr };
-                luaaa_detail::CallbackContext ctx = { ref, argv, luaaa_detail::erase_addr(result) };
+                luaaa_detail::CallbackContext ctx = { ref, argv, result.addr() };
                 luaaa_detail::RunProtected(mainL, &luaaa_detail::CallbackRunner<RET, ARGS...>::Run, &ctx);
-                return result;
+                return result.take();
             };
         }
-        inline static void put(lua_State * L, FTYPE f)
+        inline static void put(lua_State * L, const FTYPE& f)
         {
             // See the function-pointer variant: the callable must travel as an
             // upvalue (a holder userdata), not inside a bare lua_pushcfunction.
-            FTYPE* funPtr = (FTYPE*)lua_newuserdata(L, sizeof(FTYPE));
-            new (funPtr) FTYPE(f);
-            AttachHolderFinalizer<FTYPE>(L);
-            lua_pushcclosure(L, NonMemberFunctionCaller(f), 1);
-        }
-    };
-
-    template<typename ...ARGS>
-    struct LuaStack<std::function<void(ARGS...)>>
-    {
-        typedef std::function<void(ARGS...)> FTYPE;
-        inline static FTYPE get(lua_State * L, int idx)
-        {
-            if (!lua_isfunction(L, idx))
-            {
-                return nullptr;
-            }
-            lua_State * mainL = luaaa_detail::MainThread(L);
-            lua_pushvalue(L, idx);
-            int ref = luaL_ref(L, LUA_REGISTRYINDEX);
-            std::shared_ptr<void> guard(nullptr, [mainL, ref](void*) {
-                luaL_unref(mainL, LUA_REGISTRYINDEX, ref);
-            });
-            return [mainL, ref, guard](ARGS... args) -> void {
-                void* argv[] = { luaaa_detail::erase_addr(args)..., nullptr };
-                luaaa_detail::CallbackContext ctx = { ref, argv, nullptr };
-                luaaa_detail::RunProtected(mainL, &luaaa_detail::CallbackRunner<void, ARGS...>::Run, &ctx);
-            };
-        }
-        inline static void put(lua_State * L, FTYPE f)
-        {
-            // See the function-pointer variant: the callable must travel as an
-            // upvalue (a holder userdata), not inside a bare lua_pushcfunction.
-            FTYPE* funPtr = (FTYPE*)lua_newuserdata(L, sizeof(FTYPE));
-            new (funPtr) FTYPE(f);
-            AttachHolderFinalizer<FTYPE>(L);
+            luaaa_detail::push_holder<FTYPE>(L, f);
             lua_pushcclosure(L, NonMemberFunctionCaller(f), 1);
         }
     };
@@ -1616,17 +1879,40 @@ namespace LUAAA_NS
     }
 
     //========================================================
-    // non-member function caller & static member function caller
+    // callers: the lua_CFunction behind every bound function
     //========================================================
+    // One template serves a value-returning and a void function alike: the
+    // result (if any) is pushed by ReturnPusher.
+    template<typename TRET>
+    struct ReturnPusher
+    {
+        template<typename CALL>
+        static int run(lua_State* state, const CALL& call)
+        {
+            LuaStackReturn<TRET>(state, call());
+            return 1;
+        }
+    };
+
+    template<>
+    struct ReturnPusher<void>
+    {
+        template<typename CALL>
+        static int run(lua_State*, const CALL& call)
+        {
+            call();
+            return 0;
+        }
+    };
+
     template<typename TRET, typename FTYPE, typename ...ARGS, std::size_t... Ns>
     TRET LuaInvokeImpl(lua_State* state, void* calleePtr, size_t skip, indices<Ns...>)
     {
-        // Argument extraction (LuaStack<ARGS>::get) may itself luaL_error (longjmp),
-        // but the actual C++ call below can throw. Wrap it so an exception becomes a
-        // lua_error instead of escaping the extern "C" boundary and terminating.
+        // A failing argument conversion or a C++ exception thrown by the call
+        // becomes a lua error at this boundary (see "error plumbing").
         LUAAA_BOUNDARY_TRY(calleePtr)
         {
-            return (*(FTYPE*)(calleePtr))(LuaStack<ARGS>::get(state, Ns + 1 + skip)...);
+            return (*(FTYPE*)(calleePtr))(LuaStack<ARGS>::get(state, (int)(Ns + 1 + skip))...);
         }
         LUAAA_BOUNDARY_CATCH(state, "function call")
     }
@@ -1638,95 +1924,69 @@ namespace LUAAA_NS
         return LuaInvokeImpl<TRET, FTYPE, ARGS...>(state, calleePtr, skip, typename make_arg_indices<ARGS...>::type());
     }
 
+    // A callable stored in the closure's upvalue 1 and called with the lua
+    // arguments that follow the first SKIP ones (SKIP = 1: a class function
+    // called as obj:f(...), whose `self` is not passed on).
+    template<int SKIP, typename FTYPE, typename TRET, typename ...ARGS>
+    struct FunctionInvoker
+    {
+        struct Call
+        {
+            lua_State* state;
+            void* callee;
+            TRET operator()() const { return LuaInvoke<TRET, FTYPE, ARGS...>(state, callee, SKIP); }
+        };
 
-#define LUAAA_IMPLEMENT_FUNCTION_CALLER(CALLERNAME, CALLCONV, SKIPPARAM) \
+        static int Invoke(lua_State* state)
+        {
+            void * calleePtr = lua_touserdata(state, lua_upvalueindex(1));
+            luaL_argcheck(state, calleePtr, 1, "cpp closure function not found.");
+            const Call call = { state, calleePtr };
+            return ReturnPusher<TRET>::run(state, call);
+        }
+    };
+
+#define LUAAA_IMPLEMENT_FUNCTION_CALLER(CALLCONV) \
     template<typename TRET, typename ...ARGS> \
-    lua_CFunction CALLERNAME(TRET(CALLCONV*func)(ARGS...)) \
+    inline lua_CFunction NonMemberFunctionCaller(TRET(CALLCONV*)(ARGS...)) \
     { \
-        typedef decltype(func) FTYPE; (void)(func); \
-        struct HelperClass \
-        { \
-            static int Invoke(lua_State* state) \
-            { \
-                void * calleePtr = lua_touserdata(state, lua_upvalueindex(1)); \
-                luaL_argcheck(state, calleePtr, 1, "cpp closure function not found."); \
-                if (calleePtr) \
-                { \
-                    LuaStackReturn<TRET>(state, LuaInvoke<TRET, FTYPE, ARGS...>(state, calleePtr, SKIPPARAM)); \
-                    return 1; \
-                } \
-                return 0; \
-            } \
-        }; \
-        return HelperClass::Invoke; \
+        return &FunctionInvoker<0, TRET(CALLCONV*)(ARGS...), TRET, ARGS...>::Invoke; \
     } \
-    template<typename ...ARGS> \
-    lua_CFunction CALLERNAME(void(CALLCONV*func)(ARGS...)) \
+    template<typename TRET, typename ...ARGS> \
+    inline lua_CFunction MemberFunctionCaller(TRET(CALLCONV*)(ARGS...)) \
     { \
-        typedef decltype(func) FTYPE; (void)(func); \
-        struct HelperClass \
-        { \
-            static int Invoke(lua_State* state) \
-            { \
-                void * calleePtr = lua_touserdata(state, lua_upvalueindex(1)); \
-                luaL_argcheck(state, calleePtr, 1, "cpp closure function not found."); \
-                if (calleePtr) \
-                { \
-                    LuaInvoke<void, FTYPE, ARGS...>(state, calleePtr, SKIPPARAM); \
-                } \
-                return 0; \
-            } \
-        }; \
-        return HelperClass::Invoke; \
+        return &FunctionInvoker<1, TRET(CALLCONV*)(ARGS...), TRET, ARGS...>::Invoke; \
     }
 
 #if defined(_MSC_VER)
-    LUAAA_IMPLEMENT_FUNCTION_CALLER(NonMemberFunctionCaller, __cdecl, 0);
-    LUAAA_IMPLEMENT_FUNCTION_CALLER(MemberFunctionCaller, __cdecl, 1);
-    LUAAA_IMPLEMENT_CALLBACK_INVOKER(__cdecl);
+    LUAAA_IMPLEMENT_FUNCTION_CALLER(__cdecl)
+    LUAAA_IMPLEMENT_CALLBACK_INVOKER(__cdecl)
 
 #	ifdef _M_CEE
-    LUAAA_IMPLEMENT_FUNCTION_CALLER(NonMemberFunctionCaller, __clrcall, 0);
-    LUAAA_IMPLEMENT_FUNCTION_CALLER(MemberFunctionCaller, __clrcall, 1);
-    LUAAA_IMPLEMENT_CALLBACK_INVOKER(__clrcall);
+    LUAAA_IMPLEMENT_FUNCTION_CALLER(__clrcall)
+    LUAAA_IMPLEMENT_CALLBACK_INVOKER(__clrcall)
 #	endif
 
 #	if defined(_M_IX86) && !defined(_M_CEE)
-    LUAAA_IMPLEMENT_FUNCTION_CALLER(NonMemberFunctionCaller, __fastcall, 0);
-    LUAAA_IMPLEMENT_FUNCTION_CALLER(MemberFunctionCaller, __fastcall, 1);
-    LUAAA_IMPLEMENT_CALLBACK_INVOKER(__fastcall);
+    LUAAA_IMPLEMENT_FUNCTION_CALLER(__fastcall)
+    LUAAA_IMPLEMENT_CALLBACK_INVOKER(__fastcall)
 #	endif
 
 #	ifdef _M_IX86
-    LUAAA_IMPLEMENT_FUNCTION_CALLER(NonMemberFunctionCaller, __stdcall, 0);
-    LUAAA_IMPLEMENT_FUNCTION_CALLER(MemberFunctionCaller, __stdcall, 1);
-    LUAAA_IMPLEMENT_CALLBACK_INVOKER(__stdcall);
+    LUAAA_IMPLEMENT_FUNCTION_CALLER(__stdcall)
+    LUAAA_IMPLEMENT_CALLBACK_INVOKER(__stdcall)
 #	endif
 
 #	if ((defined(_M_IX86) && _M_IX86_FP >= 2) || defined(_M_X64)) && !defined(_M_CEE)
-    LUAAA_IMPLEMENT_FUNCTION_CALLER(NonMemberFunctionCaller, __vectorcall, 0);
-    LUAAA_IMPLEMENT_FUNCTION_CALLER(MemberFunctionCaller, __vectorcall, 1);
-    LUAAA_IMPLEMENT_CALLBACK_INVOKER(__vectorcall);
+    LUAAA_IMPLEMENT_FUNCTION_CALLER(__vectorcall)
+    LUAAA_IMPLEMENT_CALLBACK_INVOKER(__vectorcall)
 #	endif
-#elif defined(__clang__)
-#	define LUAAA_NOTHING
-    LUAAA_IMPLEMENT_FUNCTION_CALLER(NonMemberFunctionCaller, LUAAA_NOTHING, 0);
-    LUAAA_IMPLEMENT_FUNCTION_CALLER(MemberFunctionCaller, LUAAA_NOTHING, 1);
-    LUAAA_IMPLEMENT_CALLBACK_INVOKER(LUAAA_NOTHING);
-#	undef LUAAA_NOTHING
-#elif defined(__GNUC__)
-#	define LUAAA_NOTHING
-    LUAAA_IMPLEMENT_FUNCTION_CALLER(NonMemberFunctionCaller, LUAAA_NOTHING, 0);
-    LUAAA_IMPLEMENT_FUNCTION_CALLER(MemberFunctionCaller, LUAAA_NOTHING, 1);
-    LUAAA_IMPLEMENT_CALLBACK_INVOKER(LUAAA_NOTHING);
-#	undef LUAAA_NOTHING
 #else
 #	define LUAAA_NOTHING
-    LUAAA_IMPLEMENT_FUNCTION_CALLER(NonMemberFunctionCaller, LUAAA_NOTHING, 0);
-    LUAAA_IMPLEMENT_FUNCTION_CALLER(MemberFunctionCaller, LUAAA_NOTHING, 1);
-    LUAAA_IMPLEMENT_CALLBACK_INVOKER(LUAAA_NOTHING);
+    LUAAA_IMPLEMENT_FUNCTION_CALLER(LUAAA_NOTHING)
+    LUAAA_IMPLEMENT_CALLBACK_INVOKER(LUAAA_NOTHING)
 #	undef LUAAA_NOTHING
-#endif	
+#endif
 
     //========================================================
     // member function invoker
@@ -1734,15 +1994,9 @@ namespace LUAAA_NS
     template<typename TCLASS, typename TRET, typename FTYPE, typename ...ARGS, std::size_t... Ns>
     TRET LuaInvokeInstanceMemberImpl(lua_State* state, void* calleePtr, indices<Ns...>)
     {
-        // Mirrors LuaInvokeImpl: a member function call can throw a C++ exception,
-        // which must become a lua_error instead of escaping the extern "C" boundary
-        // and terminating the host process (H4 -- the member path was the one gap
-        // left by the original H2 exception-translation fix).
-        // Argument extraction (LuaStack<ARGS>::get) may itself luaL_error (longjmp),
-        // which is not a C++ exception and so is not caught here -- same as non-member.
         LUAAA_BOUNDARY_TRY(calleePtr)
         {
-            return (LuaStack<TCLASS>::get(state, 1).**(FTYPE*)(calleePtr))(LuaStack<ARGS>::get(state, Ns + 2)...);
+            return (LuaStack<TCLASS>::get(state, 1).**(FTYPE*)(calleePtr))(LuaStack<ARGS>::get(state, (int)(Ns + 2))...);
         }
         LUAAA_BOUNDARY_CATCH(state, "member function call")
     }
@@ -1754,172 +2008,341 @@ namespace LUAAA_NS
         return LuaInvokeInstanceMemberImpl<TCLASS, TRET, FTYPE, ARGS...>(state, calleePtr, typename make_arg_indices<ARGS...>::type());
     }
 
-
-    template<typename TCLASS, typename TRET, typename ...ARGS>
-    lua_CFunction MemberFunctionCaller(TRET(TCLASS::*func)(ARGS...))
+    // A member function pointer stored in upvalue 1 and applied to `self`
+    // (argument 1) read as a TCLASS. TCLASS is the class being bound, which
+    // may be DERIVED from the class that declares the member: binding
+    // &Dog::name where name() is inherited from Animal needs no bound Animal.
+    template<typename TCLASS, typename FTYPE, typename TRET, typename ...ARGS>
+    struct MethodInvoker
     {
-        typedef decltype(func) FTYPE; (void)(func);
-        struct HelperClass
+        struct Call
         {
-            static int Invoke(lua_State* state)
-            {
-                void * calleePtr = lua_touserdata(state, lua_upvalueindex(1));
-                luaL_argcheck(state, calleePtr, 1, "cpp closure function not found.");
-                if (calleePtr)
-                {
-                    LuaStackReturn<TRET>(state, LuaInvokeInstanceMember<TCLASS, TRET, FTYPE, ARGS...>(state, calleePtr));
-                    return 1;
-                }
-                return 0;
-            }
+            lua_State* state;
+            void* callee;
+            TRET operator()() const { return LuaInvokeInstanceMember<TCLASS, TRET, FTYPE, ARGS...>(state, callee); }
         };
-        return HelperClass::Invoke;
+
+        static int Invoke(lua_State* state)
+        {
+            void * calleePtr = lua_touserdata(state, lua_upvalueindex(1));
+            luaL_argcheck(state, calleePtr, 1, "cpp closure function not found.");
+            const Call call = { state, calleePtr };
+            return ReturnPusher<TRET>::run(state, call);
+        }
+    };
+
+    template<typename TCLASS, typename FCLASS, typename TRET, typename ...ARGS>
+    inline lua_CFunction MethodCaller(TRET(FCLASS::*)(ARGS...))
+    {
+        return &MethodInvoker<TCLASS, TRET(FCLASS::*)(ARGS...), TRET, ARGS...>::Invoke;
+    }
+
+    template<typename TCLASS, typename FCLASS, typename TRET, typename ...ARGS>
+    inline lua_CFunction MethodCaller(TRET(FCLASS::*)(ARGS...) const)
+    {
+        return &MethodInvoker<TCLASS, TRET(FCLASS::*)(ARGS...) const, TRET, ARGS...>::Invoke;
     }
 
     template<typename TCLASS, typename TRET, typename ...ARGS>
-    lua_CFunction MemberFunctionCaller(TRET(TCLASS::*func)(ARGS...)const)
+    inline lua_CFunction MemberFunctionCaller(TRET(TCLASS::*func)(ARGS...))
     {
-        typedef decltype(func) FTYPE; (void)(func);
-        struct HelperClass
-        {
-            static int Invoke(lua_State* state)
-            {
-                void * calleePtr = lua_touserdata(state, lua_upvalueindex(1));
-                luaL_argcheck(state, calleePtr, 1, "cpp closure function not found.");
-                if (calleePtr)
-                {
-                    LuaStackReturn<TRET>(state, LuaInvokeInstanceMember<TCLASS, TRET, FTYPE, ARGS...>(state, calleePtr));
-                    return 1;
-                }
-                return 0;
-            }
-        };
-        return HelperClass::Invoke;
+        return MethodCaller<TCLASS>(func);
     }
 
-    template<typename TCLASS, typename ...ARGS>
-    lua_CFunction MemberFunctionCaller(void(TCLASS::*func)(ARGS...))
+    template<typename TCLASS, typename TRET, typename ...ARGS>
+    inline lua_CFunction MemberFunctionCaller(TRET(TCLASS::*func)(ARGS...) const)
     {
-        typedef decltype(func) FTYPE; (void)(func);
-        struct HelperClass
-        {
-            static int Invoke(lua_State* state)
-            {
-                void * calleePtr = lua_touserdata(state, lua_upvalueindex(1));
-                luaL_argcheck(state, calleePtr, 1, "cpp closure function not found.");
-                if (calleePtr)
-                {
-                    LuaInvokeInstanceMember<TCLASS, void, FTYPE, ARGS...>(state, calleePtr);
-                }
-                return 0;
-            }
-        };
-        return HelperClass::Invoke;
-    }
-
-    template<typename TCLASS, typename ...ARGS>
-    lua_CFunction MemberFunctionCaller(void(TCLASS::*func)(ARGS...)const)
-    {
-        typedef decltype(func) FTYPE; (void)(func);
-        struct HelperClass
-        {
-            static int Invoke(lua_State* state)
-            {
-                void * calleePtr = lua_touserdata(state, lua_upvalueindex(1));
-                luaL_argcheck(state, calleePtr, 1, "cpp closure function not found.");
-                if (calleePtr)
-                {
-                    LuaInvokeInstanceMember<TCLASS, void, FTYPE, ARGS...>(state, calleePtr);
-                }
-                return 0;
-            }
-        };
-        return HelperClass::Invoke;
+        return MethodCaller<TCLASS>(func);
     }
 
 #if !LUAAA_WITHOUT_CPP_STDLIB
     template<typename TRET, typename ...ARGS>
-    lua_CFunction MemberFunctionCaller(const std::function<TRET(ARGS...)>& func)
+    inline lua_CFunction MemberFunctionCaller(const std::function<TRET(ARGS...)>&)
     {
-        typedef std::function<TRET(ARGS...)> FTYPE; (void)(func);
-        struct HelperClass
-        {
-            static int Invoke(lua_State* state)
-            {
-                void * calleePtr = lua_touserdata(state, lua_upvalueindex(1));
-                luaL_argcheck(state, calleePtr, 1, "cpp closure function not found.");
-                if (calleePtr)
-                {
-                    LuaStackReturn<TRET>(state, LuaInvoke<TRET, FTYPE, ARGS...>(state, calleePtr, 1));
-                    return 1;
-                }
-                return 0;
-            }
-        };
-        return HelperClass::Invoke;
-    }
-
-    template<typename ...ARGS>
-    lua_CFunction MemberFunctionCaller(const std::function<void(ARGS...)>& func)
-    {
-        typedef std::function<void(ARGS...)> FTYPE; (void)(func);
-        struct HelperClass
-        {
-            static int Invoke(lua_State* state)
-            {
-                void * calleePtr = lua_touserdata(state, lua_upvalueindex(1));
-                luaL_argcheck(state, calleePtr, 1, "cpp closure function not found.");
-                if (calleePtr)
-                {
-                    LuaInvoke<void, FTYPE, ARGS...>(state, calleePtr, 1);
-                }
-                return 0;
-            }
-        };
-        return HelperClass::Invoke;
+        return &FunctionInvoker<1, std::function<TRET(ARGS...)>, TRET, ARGS...>::Invoke;
     }
 
     template<typename TRET, typename ...ARGS>
-    lua_CFunction NonMemberFunctionCaller(const std::function<TRET(ARGS...)>& func)
+    inline lua_CFunction NonMemberFunctionCaller(const std::function<TRET(ARGS...)>&)
     {
-        typedef std::function<TRET(ARGS...)> FTYPE; (void)(func);
-        struct HelperClass
-        {
-            static int Invoke(lua_State* state)
-            {
-                void * calleePtr = lua_touserdata(state, lua_upvalueindex(1));
-                luaL_argcheck(state, calleePtr, 1, "cpp closure function not found.");
-                if (calleePtr)
-                {
-                    LuaStackReturn<TRET>(state, LuaInvoke<TRET, FTYPE, ARGS...>(state, calleePtr, 0));
-                    return 1;
-                }
-                return 0;
-            }
-        };
-        return HelperClass::Invoke;
-    }
-
-    template<typename ...ARGS>
-    lua_CFunction NonMemberFunctionCaller(const std::function<void(ARGS...)>& func)
-    {
-        typedef std::function<void(ARGS...)> FTYPE; (void)(func);
-        struct HelperClass
-        {
-            static int Invoke(lua_State* state)
-            {
-                void * calleePtr = lua_touserdata(state, lua_upvalueindex(1));
-                luaL_argcheck(state, calleePtr, 1, "cpp closure function not found.");
-                if (calleePtr)
-                {
-                    LuaInvoke<void, FTYPE, ARGS...>(state, calleePtr, 0);
-                }
-                return 0;
-            }
-        };
-        return HelperClass::Invoke;
+        return &FunctionInvoker<0, std::function<TRET(ARGS...)>, TRET, ARGS...>::Invoke;
     }
 #endif
+
+    //========================================================
+    // overloads
+    //========================================================
+    // LuaClass::overload / LuaModule::overload register several functions
+    // under ONE lua name. A call runs the first of them (in registration
+    // order) that the arguments fit: as many arguments as the function has
+    // parameters -- fewer only where the missing ones may be nil -- and each
+    // argument of a lua type the parameter can take. The check is by KIND, not
+    // by value: number vs string vs boolean vs table vs function vs object of
+    // a bound class. An integer parameter takes only a number with an integral
+    // value, so f(int) and f(double) can be told apart for 1.5 (for 2, the one
+    // registered first wins). A type luaaa knows nothing about (a user
+    // LuaStack specialization) fits anything.
+    namespace luaaa_detail {
+        template<int N> struct rank : rank<N - 1> {};
+        template<> struct rank<0> {};
+
+        template<typename T>
+        inline bool match_arg(lua_State*, int, const T*, rank<0>)
+        {
+            return true;
+        }
+
+        template<typename T>
+        inline auto match_arg(lua_State* L, int idx, const T*, rank<1>) -> decltype((void)LuaStack<T>::LUAAA_BOUND_CLASS_STACK, bool())
+        {
+            return to_object(L, idx, LuaClass<T>::typeKey()) != nullptr;
+        }
+
+        template<typename T>
+        inline auto match_arg(lua_State* L, int idx, const T*, rank<2>) -> decltype((void)LuaStack<T>::LUAAA_TABLE_STACK, bool())
+        {
+            return lua_istable(L, idx) != 0;
+        }
+
+        template<typename T>
+        inline typename std::enable_if<std::is_floating_point<T>::value, bool>::type match_arg(lua_State* L, int idx, const T*, rank<3>)
+        {
+            return lua_type(L, idx) == LUA_TNUMBER;
+        }
+
+        template<typename T>
+        inline typename std::enable_if<(std::is_integral<T>::value && !std::is_same<T, bool>::value) || std::is_enum<T>::value, bool>::type match_arg(lua_State* L, int idx, const T*, rank<3>)
+        {
+            if (lua_type(L, idx) != LUA_TNUMBER)
+            {
+                return false;
+            }
+            int isnum = 0;
+            const lua_Integer v = LUAAA_tointegerx(L, idx, &isnum);
+            return isnum && static_cast<lua_Number>(v) == lua_tonumber(L, idx);
+        }
+
+        template<typename T>
+        inline bool match_arg(lua_State* L, int idx, T* const*, rank<3>)
+        {
+            const int t = lua_type(L, idx);
+            if (t == LUA_TLIGHTUSERDATA)
+            {
+                return true;
+            }
+#if LUAAA_NIL_AS_NULLPTR
+            if (t == LUA_TNIL || t == LUA_TNONE)
+            {
+                return true;
+            }
+#endif
+            return to_object(L, idx, LuaClass<typename std::remove_cv<T>::type>::typeKey()) != nullptr;
+        }
+
+        inline bool match_arg(lua_State* L, int idx, const bool*, rank<4>)
+        {
+            return lua_type(L, idx) == LUA_TBOOLEAN;
+        }
+
+        inline bool match_arg(lua_State* L, int idx, const char* const*, rank<4>)
+        {
+            return lua_type(L, idx) == LUA_TSTRING;
+        }
+
+        inline bool match_arg(lua_State* L, int idx, char* const*, rank<4>)
+        {
+            return lua_type(L, idx) == LUA_TSTRING;
+        }
+
+        template<typename TRET, typename ...ARGS>
+        inline bool match_arg(lua_State* L, int idx, TRET(* const*)(ARGS...), rank<4>)
+        {
+            return lua_isfunction(L, idx) != 0;
+        }
+
+#if !LUAAA_WITHOUT_CPP_STDLIB
+        inline bool match_arg(lua_State* L, int idx, const std::string*, rank<4>)
+        {
+            return lua_type(L, idx) == LUA_TSTRING;
+        }
+
+        template<typename SIG>
+        inline bool match_arg(lua_State* L, int idx, const std::function<SIG>*, rank<4>)
+        {
+            return lua_isfunction(L, idx) != 0;
+        }
+
+        template<typename T>
+        inline bool match_arg(lua_State* L, int idx, const std::shared_ptr<T>*, rank<4>)
+        {
+            return lua_isnoneornil(L, idx) || to_object(L, idx, LuaClass<typename std::remove_cv<T>::type>::typeKey()) != nullptr;
+        }
+
+        template<typename T, typename D>
+        inline bool match_arg(lua_State* L, int idx, const std::unique_ptr<T, D>*, rank<4>)
+        {
+            return lua_isnoneornil(L, idx) || to_object(L, idx, LuaClass<typename std::remove_cv<T>::type>::typeKey()) != nullptr;
+        }
+#endif
+
+        // Do the `nargs` lua arguments starting at stack index `first` fit ARGS?
+        template<typename ...ARGS>
+        struct ArgsMatcher
+        {
+            static bool match(lua_State* L, int first, int nargs)
+            {
+                if (nargs > (int)count_lua_args<ARGS...>::value)
+                {
+                    return false;
+                }
+                return impl(L, first, typename make_arg_indices<ARGS...>::type());
+            }
+
+        private:
+            template<std::size_t ...Ns>
+            static bool impl(lua_State* L, int first, indices<Ns...>)
+            {
+                (void)L; (void)first;
+                const bool fits[] = { true, (is_lua_state_decayed<ARGS>::value
+                    || match_arg(L, first + (int)Ns, static_cast<const typename std::decay<ARGS>::type*>(nullptr), rank<4>()))... };
+                for (std::size_t i = 0; i < sizeof(fits) / sizeof(fits[0]); ++i)
+                {
+                    if (!fits[i])
+                    {
+                        return false;
+                    }
+                }
+                return true;
+            }
+        };
+
+        typedef bool (*OverloadMatcher)(lua_State* L, int first, int nargs);
+
+        template<typename TRET, typename ...ARGS>
+        inline OverloadMatcher matcher_of(TRET(*)(ARGS...)) { return &ArgsMatcher<ARGS...>::match; }
+        template<typename TCLASS, typename TRET, typename ...ARGS>
+        inline OverloadMatcher matcher_of(TRET(TCLASS::*)(ARGS...)) { return &ArgsMatcher<ARGS...>::match; }
+        template<typename TCLASS, typename TRET, typename ...ARGS>
+        inline OverloadMatcher matcher_of(TRET(TCLASS::*)(ARGS...) const) { return &ArgsMatcher<ARGS...>::match; }
+#if !LUAAA_WITHOUT_CPP_STDLIB
+        template<typename TRET, typename ...ARGS>
+        inline OverloadMatcher matcher_of(const std::function<TRET(ARGS...)>&) { return &ArgsMatcher<ARGS...>::match; }
+#endif
+
+        // The function behind an overloaded name.
+        // upvalue 1: { fn, matcher, fn, matcher, ... }
+        // upvalue 2: leading arguments the matchers skip (1 for a class function: self)
+        // upvalue 3: the name, for the error message
+        inline int overload_dispatch(lua_State* L)
+        {
+            const int top = lua_gettop(L);
+            const int skip = (int)lua_tointeger(L, lua_upvalueindex(2));
+            const int nargs = (top > skip) ? (top - skip) : 0;
+            luaL_checkstack(L, 8, "too many arguments");
+            for (int i = 1; ; i += 2)
+            {
+                lua_rawgeti(L, lua_upvalueindex(1), i + 1);
+                const OverloadMatcher* matcher = (const OverloadMatcher*)lua_touserdata(L, -1);
+                lua_pop(L, 1);
+                if (!matcher)
+                {
+                    break;
+                }
+                if ((*matcher)(L, skip + 1, nargs))
+                {
+                    lua_rawgeti(L, lua_upvalueindex(1), i);
+                    lua_insert(L, 1);
+                    lua_call(L, top, LUA_MULTRET);
+                    return lua_gettop(L);
+                }
+            }
+            return luaL_error(L, "no overload of '%s' matches the given arguments", lua_tostring(L, lua_upvalueindex(3)));
+        }
+
+        // stack: [.., table, fn] -> fn becomes one more overload of table[name]; pops fn.
+        inline void add_overload(lua_State* L, const char* name, OverloadMatcher matcher, int skip)
+        {
+            const int fn = lua_gettop(L);
+            const int tbl = fn - 1;
+            lua_pushstring(L, name);
+            lua_rawget(L, tbl);                             // [tbl, fn, existing]
+            if (!(lua_tocfunction(L, -1) == &overload_dispatch && lua_getupvalue(L, -1, 1) != nullptr))
+            {
+                lua_settop(L, fn);
+                lua_newtable(L);                            // [tbl, fn, list]
+                lua_pushstring(L, name);
+                lua_pushvalue(L, -2);
+                lua_pushinteger(L, skip);
+                lua_pushstring(L, name);
+                lua_pushcclosure(L, &overload_dispatch, 3); // [tbl, fn, list, name, dispatcher]
+                lua_rawset(L, tbl);                         // [tbl, fn, list]
+            }
+            const int list = lua_gettop(L);
+            const int n = (int)LUAAA_rawlen(L, list);
+            lua_pushvalue(L, fn);
+            lua_rawseti(L, list, n + 1);
+            OverloadMatcher* slot = (OverloadMatcher*)lua_newuserdata(L, sizeof(OverloadMatcher));
+            *slot = matcher;
+            lua_rawseti(L, list, n + 2);
+            lua_settop(L, tbl);
+        }
+
+        // Push the table `name` designates, creating what is missing: "_G" is
+        // the globals table, "a.b.c" is _G.a.b.c (the same on every Lua
+        // version). Lookups are raw, so a metatable on _G is neither consulted
+        // nor triggered.
+        inline void push_named_table(lua_State* L, const char* name)
+        {
+            luaL_checkstack(L, 6, "luaaa: stack overflow");
+            LUAAA_pushglobaltable(L);
+            if (strcmp(name, "_G") == 0)
+            {
+                return;
+            }
+            for (const char* p = name; ; )
+            {
+                const char* dot = strchr(p, '.');
+                const size_t len = dot ? (size_t)(dot - p) : strlen(p);
+                lua_pushlstring(L, p, len);
+                lua_rawget(L, -2);                          // [parent, value]
+                if (lua_isnil(L, -1))
+                {
+                    lua_pop(L, 1);
+                    lua_newtable(L);                        // [parent, table]
+                    lua_pushlstring(L, p, len);
+                    lua_pushvalue(L, -2);
+                    lua_rawset(L, -4);
+                }
+                else if (!lua_istable(L, -1))
+                {
+                    luaL_error(L, "luaaa: name conflict for '%s': an existing value is not a table", name);
+                }
+                lua_remove(L, -2);                          // [table]
+                if (!dot)
+                {
+                    break;
+                }
+                p = dot + 1;
+            }
+#if LUAAA_REGISTER_IN_PACKAGE_LOADED
+            lua_getfield(L, LUA_REGISTRYINDEX, "_LOADED");  // [table, package.loaded]
+            if (lua_istable(L, -1))
+            {
+                lua_pushstring(L, name);
+                lua_rawget(L, -2);
+                const bool missing = lua_isnil(L, -1);
+                lua_pop(L, 1);
+                if (missing)
+                {
+                    lua_pushstring(L, name);
+                    lua_pushvalue(L, -3);
+                    lua_rawset(L, -3);
+                }
+            }
+            lua_pop(L, 1);
+#endif
+        }
+    }
 
     //========================================================
     // constructor invoker
@@ -2019,22 +2442,6 @@ namespace LUAAA_NS
     }
 
     //========================================================
-    // internal property-name builder
-    //========================================================
-    // Property getters/setters are stored under a prefixed key ("<name" for a
-    // getter, ">name" for a setter). Build that key into `buf`, raising a lua
-    // error instead of silently truncating -- a truncated key could otherwise
-    // collide with a different property and read/write the wrong one.
-    inline void MakeInternalPropName(lua_State* L, char* buf, size_t buflen, char prefix, const char* name)
-    {
-        int n = snprintf(buf, buflen, "%c%s", prefix, (name ? name : ""));
-        if (n < 0 || (size_t)n >= buflen)
-        {
-            luaL_error(L, "luaaa: property name too long (max %d bytes): '%s'", (int)(buflen - 2), (name ? name : "?"));
-        }
-    }
-
-    //========================================================
     // built-in lua-side inheritance helpers (luaaa:extend / luaaa:base)
     //========================================================
 #if LUAAA_FEATURE_EXTEND
@@ -2058,7 +2465,7 @@ namespace LUAAA_NS
     // earlier object; extending an extended class did not work at all.)
 
     // __index of an extended instance.
-    // upvalue(1) = the class table, upvalue(2) = the C++ class metatable's __index.
+    // upvalue(1) = the class table, upvalue(2) = the C++ class's metatable.
     inline int f_extend_instance_index(lua_State* L)
     {
         lua_settop(L, 2);                               // [self, key]
@@ -2069,17 +2476,20 @@ namespace LUAAA_NS
             return 1;
         }
         lua_pop(L, 1);
-        if (lua_isfunction(L, lua_upvalueindex(2)))
+        // Fetched on every access, not cached: the C++ class switches its
+        // __index from a table to a function when it gains its first property.
+        lua_pushstring(L, "__index");
+        lua_rawget(L, lua_upvalueindex(2));             // [self, key, index]
+        if (lua_isfunction(L, -1))
         {
-            lua_pushvalue(L, lua_upvalueindex(2));
             lua_insert(L, 1);                           // [index, self, key]
             lua_call(L, 2, 1);
             return 1;
         }
-        if (lua_istable(L, lua_upvalueindex(2)))        // LUAAA_FEATURE_PROPERTY=0: __index is a table
+        if (lua_istable(L, -1))                         // the bare methods table
         {
             lua_pushvalue(L, 2);
-            lua_gettable(L, lua_upvalueindex(2));
+            lua_rawget(L, -2);
             return 1;
         }
         lua_pushnil(L);
@@ -2142,10 +2552,12 @@ namespace LUAAA_NS
             lua_pushstring(L, "__gc");
             lua_pushnil(L);
             lua_rawset(L, cmt + 1);
+            lua_pushstring(L, "__metatable");           // a lua-side object stays open to its script
+            lua_pushnil(L);
+            lua_rawset(L, cmt + 1);
             lua_pushstring(L, "__index");
             lua_pushvalue(L, lua_upvalueindex(2));      // the class table
-            lua_pushstring(L, "__index");
-            lua_rawget(L, cmt);                         // the C++ class's __index
+            lua_pushvalue(L, cmt);                      // the C++ class's metatable
             lua_pushcclosure(L, f_extend_instance_index, 2);
             lua_rawset(L, cmt + 1);
             lua_pushvalue(L, cmt + 1);
@@ -2229,7 +2641,7 @@ namespace LUAAA_NS
     inline void installExtendHelper(lua_State* L)
     {
         static char s_extendKey = 0;
-        lua_rawgetp(L, LUA_REGISTRYINDEX, &s_extendKey);   // (returns void on 5.2: test the value)
+        LUAAA_rawgetp(L, LUA_REGISTRYINDEX, &s_extendKey);   // (returns void on 5.2: test the value)
         if (!lua_isnil(L, -1))
         {
             lua_pop(L, 1);                          // already installed
@@ -2263,9 +2675,470 @@ namespace LUAAA_NS
         lua_setglobal(L, "luaaa");
 
         lua_pushboolean(L, 1);
-        lua_rawsetp(L, LUA_REGISTRYINDEX, &s_extendKey);
+        LUAAA_rawsetp(L, LUA_REGISTRYINDEX, &s_extendKey);
     }
 #endif
+
+    //========================================================
+    // class metatable dispatch
+    //========================================================
+    // What a class metatable holds:
+    //   [MT_METHODS]  table: functions and constants, by name  (what obj.name finds)
+    //   [MT_GETTERS]  table: property getters, by property name
+    //   [MT_SETTERS]  table: property setters, by property name
+    //   [MT_BASES]    table: { baseMetatable, caster, ... }     (only after inherit<>())
+    //   __index       the METHODS table itself while the class has no property,
+    //                 no user __index and no base (a method lookup then costs no
+    //                 C call); class_index below otherwise
+    //   __newindex    class_newindex
+    //   __gc          class_gc
+    //   "!__index" / "!__newindex" / "!__gc"   the user's own handlers
+    //   metamethods (__add, __tostring, ...) registered with fun()
+    //   __metatable = false  (LUAAA_PROTECT_METATABLE): scripts cannot reach any of this
+    // The functions are not templates: every class shares them.
+    namespace luaaa_detail {
+        // Look up the key at stack index 2 in the class whose metatable is at
+        // absolute index `mt`, then in its bases, depth first.
+        // Returns 0 = not found, 1 = a method / constant was pushed,
+        // 2 = a property getter was pushed.
+        inline int class_get(lua_State* L, int mt, int depth)
+        {
+            const int top = lua_gettop(L);
+            for (int slot = MT_METHODS; slot <= MT_GETTERS; ++slot)
+            {
+                lua_rawgeti(L, mt, slot);
+                if (lua_istable(L, -1))
+                {
+                    lua_pushvalue(L, 2);
+                    lua_rawget(L, -2);
+                    if (!lua_isnil(L, -1))
+                    {
+                        lua_remove(L, -2);
+                        return slot;
+                    }
+                    lua_pop(L, 1);
+                }
+                lua_pop(L, 1);
+            }
+            if (depth > 16 || !lua_checkstack(L, 6))
+            {
+                return 0;
+            }
+            lua_rawgeti(L, mt, MT_BASES);
+            if (lua_istable(L, -1))
+            {
+                const int bases = lua_gettop(L);
+                for (int i = 1; ; i += 2)
+                {
+                    lua_rawgeti(L, bases, i);
+                    if (!lua_istable(L, -1))
+                    {
+                        break;
+                    }
+                    const int found = class_get(L, bases + 1, depth + 1);
+                    if (found)
+                    {
+                        lua_replace(L, bases);
+                        lua_settop(L, bases);
+                        return found;
+                    }
+                    lua_pop(L, 1);
+                }
+            }
+            lua_settop(L, top);
+            return 0;
+        }
+
+        // Find, in the class at `mt` and then its bases: the entry of table
+        // `slot` under the key at stack index 2 (slot != 0), or the metatable
+        // field `field` (slot == 0). Pushes it and returns true when found.
+        inline bool class_find(lua_State* L, int mt, int slot, const char* field, int depth)
+        {
+            const int top = lua_gettop(L);
+            if (slot)
+            {
+                lua_rawgeti(L, mt, slot);
+                if (lua_istable(L, -1))
+                {
+                    lua_pushvalue(L, 2);
+                    lua_rawget(L, -2);
+                }
+                else
+                {
+                    lua_pushnil(L);
+                }
+                lua_remove(L, -2);
+            }
+            else
+            {
+                lua_pushstring(L, field);
+                lua_rawget(L, mt);
+            }
+            if (!lua_isnil(L, -1))
+            {
+                return true;
+            }
+            lua_pop(L, 1);
+            if (depth > 16 || !lua_checkstack(L, 6))
+            {
+                return false;
+            }
+            lua_rawgeti(L, mt, MT_BASES);
+            if (lua_istable(L, -1))
+            {
+                const int bases = lua_gettop(L);
+                for (int i = 1; ; i += 2)
+                {
+                    lua_rawgeti(L, bases, i);
+                    if (!lua_istable(L, -1))
+                    {
+                        break;
+                    }
+                    if (class_find(L, bases + 1, slot, field, depth + 1))
+                    {
+                        lua_replace(L, bases);
+                        lua_settop(L, bases);
+                        return true;
+                    }
+                    lua_pop(L, 1);
+                }
+            }
+            lua_settop(L, top);
+            return false;
+        }
+
+        // `obj[key]`. upvalue 1 = the class metatable.
+        //   string / number key : method or constant -> property getter (this
+        //                         class first, then its bases) -> user __index
+        //                         -> (a setter only => write-only error) -> nil
+        //   other keys          : nil
+        // The key is never converted: lua_tostring on a number would rewrite the
+        // caller's value in place.
+        inline int class_index(lua_State* L)
+        {
+            lua_settop(L, 2);                                   // [self, key]
+            const int keyType = lua_type(L, 2);
+            if (keyType != LUA_TSTRING && keyType != LUA_TNUMBER)
+            {
+                lua_pushnil(L);
+                return 1;
+            }
+            lua_pushvalue(L, lua_upvalueindex(1));              // [self, key, mt]
+            const int found = class_get(L, 3, 0);
+            if (found == MT_METHODS)
+            {
+                return 1;
+            }
+            if (found == MT_GETTERS)
+            {
+                lua_pushvalue(L, 1);
+                lua_pushvalue(L, 2);
+                lua_call(L, 2, 1);
+                return 1;
+            }
+            if (class_find(L, 3, 0, "!__index", 0))             // user __index: function or table
+            {
+                if (lua_isfunction(L, -1))
+                {
+                    lua_pushvalue(L, 1);
+                    lua_pushvalue(L, 2);
+                    lua_call(L, 2, 1);
+                    return 1;
+                }
+                if (lua_istable(L, -1))
+                {
+                    lua_pushvalue(L, 2);
+                    lua_rawget(L, -2);
+                    return 1;
+                }
+                lua_pop(L, 1);
+            }
+            if (keyType == LUA_TSTRING && class_find(L, 3, MT_SETTERS, nullptr, 0))
+            {
+                // Yes, there are something write-only, e.g., stdout, printer, digital io pin in output mode.
+                lua_getfield(L, 3, "__name");
+                return luaL_error(L, "attempt to read Write-Only property '%s' of '%s'", lua_tostring(L, 2), luaL_optstring(L, -1, "?"));
+            }
+            lua_pushnil(L);                                     // non-existing: nil
+            return 1;
+        }
+
+        // `obj[key] = value`. upvalue 1 = the class metatable.
+        //   string key : registered setter (this class, then its bases) -> (below)
+        //   lua-side (luaaa:extend) object : plain field on the instance table
+        //   userdata   : user __newindex (string/number key, ORIGINAL key)
+        //                -> read-only / non-existing property error
+        inline int class_newindex(lua_State* L)
+        {
+            lua_settop(L, 3);                                   // [self, key, value]
+            const int keyType = lua_type(L, 2);
+            lua_pushvalue(L, lua_upvalueindex(1));              // [self, key, value, mt]
+            if (keyType == LUA_TSTRING && class_find(L, 4, MT_SETTERS, nullptr, 0))
+            {
+                lua_pushvalue(L, 1);
+                lua_pushvalue(L, 2);
+                lua_pushvalue(L, 3);
+                lua_call(L, 3, 0);
+                return 0;
+            }
+            if (lua_istable(L, 1))
+            {
+                lua_settop(L, 3);
+                lua_rawset(L, 1);
+                return 0;
+            }
+            if (keyType != LUA_TSTRING && keyType != LUA_TNUMBER)
+            {
+                return 0;   // no setter can match such a key: leave the assignment untouched
+            }
+            if (class_find(L, 4, 0, "!__newindex", 0))
+            {
+                if (lua_isfunction(L, -1))
+                {
+                    lua_pushvalue(L, 1);
+                    lua_pushvalue(L, 2);
+                    lua_pushvalue(L, 3);
+                    lua_call(L, 3, 0);
+                    return 0;
+                }
+                if (lua_istable(L, -1))
+                {
+                    lua_pushvalue(L, 2);
+                    lua_pushvalue(L, 3);
+                    lua_rawset(L, -3);
+                    return 0;
+                }
+                lua_pop(L, 1);
+            }
+            lua_getfield(L, 4, "__name");                       // [self, key, value, mt, name]
+            if (keyType == LUA_TSTRING && class_find(L, 4, MT_GETTERS, nullptr, 0))
+            {
+                return luaL_error(L, "attempt to write Read-Only property '%s' of '%s'", lua_tostring(L, 2), luaL_optstring(L, 5, "?"));
+            }
+            lua_pushvalue(L, 2);                                // a copy: only the copy gets stringified
+            const char* shown = lua_tostring(L, -1);
+            return luaL_error(L, "attempt to access Non-existing property '%s' of '%s'", (shown ? shown : "?"), luaL_optstring(L, 5, "?"));
+        }
+
+        // __gc of every bound object.
+        // Never raises: during lua_close there is no pcall to catch an error.
+        // It can be reached by a script as well as by the collector (through
+        // the debug library, or getmetatable when LUAAA_PROTECT_METATABLE is
+        // off), so (1) only a FULL userdata whose metatable is one of ours is
+        // read as a UserData -- not a table made by luaaa:extend, not a foreign
+        // userdata such as io.stdout; and (2) an object is finalized at most
+        // once: obj/dtor are cleared, so a manual call followed by the
+        // collector's cannot destroy it twice, and LuaStack::get rejects the
+        // finalized object ("invalid user data") instead of handing out a dead
+        // pointer.
+        inline int class_gc(lua_State* L)
+        {
+            lua_settop(L, 1);                                   // [ud]
+            if (lua_type(L, 1) != LUA_TUSERDATA || !lua_getmetatable(L, 1))
+            {
+                return 0;
+            }
+            LUAAA_rawgetp(L, 2, ClassMetaTag());                // [ud, mt, tag]
+            const bool ours = (lua_toboolean(L, -1) != 0);
+            lua_pop(L, 1);
+            UserData* uData = (UserData*)lua_touserdata(L, 1);
+            if (!ours || !uData || !uData->obj)
+            {
+                return 0;   // not our object, or already finalized
+            }
+
+            if (class_find(L, 2, 0, "!__gc", 0))                // the user's __gc, before the object dies
+            {
+                if (lua_isfunction(L, -1))
+                {
+                    lua_pushvalue(L, 1);
+                    if (lua_pcall(L, 1, 0, 0) != 0)
+                    {
+                        lua_pop(L, 1);                          // do not propagate errors out of __gc
+                    }
+                }
+                else
+                {
+                    lua_pop(L, 1);
+                }
+            }
+
+            void (*dtor)(UserData*) = uData->dtor;
+            uData->dtor = nullptr;
+            if (dtor)
+            {
+                // A C++ exception out of __gc would cross the extern "C"
+                // boundary and terminate the host, and lua_error() inside __gc
+                // is itself undefined: swallow it.
+#if LUAAA_HAS_EXCEPTIONS
+                try
+#endif
+                {
+                    dtor(uData);
+                }
+#if LUAAA_HAS_EXCEPTIONS
+                catch (...) {
+                }
+#endif
+            }
+            uData->obj = nullptr;   // finalized: never destroy or hand out again
+            return 0;
+        }
+
+        //----------------------------------------------------
+        // module property dispatch (see LuaModule)
+        //----------------------------------------------------
+        inline const void* ModuleMetaTag() { static char k = 0; return &k; }
+
+        // `mod[key]` for a key that is absent from the module table.
+        // upvalue 1 = the module's metatable: [1] getters, [2] setters, __name.
+        //   string key : registered getter -> user __index
+        //                -> (setter only => write-only error) -> nil
+        //   number key : user __index -> nil
+        inline int module_index(lua_State* L)
+        {
+            lua_settop(L, 2);                                   // [mod, key]
+            const int keyType = lua_type(L, 2);
+            if (keyType != LUA_TSTRING && keyType != LUA_TNUMBER)
+            {
+                lua_pushnil(L);
+                return 1;
+            }
+            if (keyType == LUA_TSTRING)
+            {
+                lua_rawgeti(L, lua_upvalueindex(1), 1);
+                lua_pushvalue(L, 2);
+                lua_rawget(L, -2);                              // [mod, key, getters, getter]
+                if (lua_isfunction(L, -1))
+                {
+                    lua_pushvalue(L, 1);
+                    lua_pushvalue(L, 2);
+                    lua_call(L, 2, 1);
+                    return 1;
+                }
+                lua_pop(L, 2);
+            }
+            lua_pushstring(L, "__index");                       // a user handler lives in the module table
+            lua_rawget(L, 1);
+            if (lua_isfunction(L, -1))
+            {
+                lua_pushvalue(L, 1);
+                lua_pushvalue(L, 2);
+                lua_call(L, 2, 1);
+                return 1;
+            }
+            if (lua_istable(L, -1))
+            {
+                lua_pushvalue(L, 2);
+                lua_rawget(L, -2);
+                return 1;
+            }
+            lua_pop(L, 1);
+            if (keyType == LUA_TSTRING)
+            {
+                lua_rawgeti(L, lua_upvalueindex(1), 2);
+                lua_pushvalue(L, 2);
+                lua_rawget(L, -2);
+                if (lua_isfunction(L, -1))
+                {
+                    lua_getfield(L, lua_upvalueindex(1), "__name");
+                    return luaL_error(L, "attempt to read Write-Only property '%s' of '%s'", lua_tostring(L, 2), luaL_optstring(L, -1, "?"));
+                }
+            }
+            lua_pushnil(L);
+            return 1;
+        }
+
+        // `mod[key] = value` for a key that is absent from the module table.
+        //   string key : registered setter -> (getter only => read-only error)
+        //   then       : user __newindex (function or table)
+        //                -> plain assignment, under the ORIGINAL key
+        inline int module_newindex(lua_State* L)
+        {
+            lua_settop(L, 3);                                   // [mod, key, value]
+            if (lua_type(L, 2) == LUA_TSTRING)
+            {
+                lua_rawgeti(L, lua_upvalueindex(1), 2);
+                lua_pushvalue(L, 2);
+                lua_rawget(L, -2);                              // [mod, key, value, setters, setter]
+                if (lua_isfunction(L, -1))
+                {
+                    lua_pushvalue(L, 1);
+                    lua_pushvalue(L, 2);
+                    lua_pushvalue(L, 3);
+                    lua_call(L, 3, 0);
+                    return 0;
+                }
+                lua_pop(L, 2);
+                lua_rawgeti(L, lua_upvalueindex(1), 1);
+                lua_pushvalue(L, 2);
+                lua_rawget(L, -2);
+                if (lua_isfunction(L, -1))
+                {
+                    lua_getfield(L, lua_upvalueindex(1), "__name");
+                    return luaL_error(L, "attempt to write Read-Only property '%s' of '%s'", lua_tostring(L, 2), luaL_optstring(L, -1, "?"));
+                }
+                lua_pop(L, 2);                                  // [mod, key, value]
+            }
+            lua_pushstring(L, "__newindex");
+            lua_rawget(L, 1);                                   // [mod, key, value, handler]
+            if (lua_isfunction(L, -1))
+            {
+                lua_insert(L, 1);                               // [handler, mod, key, value]
+                lua_call(L, 3, 0);
+                return 0;
+            }
+            if (lua_istable(L, -1))
+            {
+                lua_replace(L, 1);                              // [handler, key, value]
+                lua_rawset(L, 1);
+                return 0;
+            }
+            lua_pop(L, 1);
+            lua_rawset(L, 1);
+            return 0;
+        }
+
+        //----------------------------------------------------
+        // push a C++ callable as a lua function
+        //----------------------------------------------------
+        inline void push_function(lua_State* L, lua_CFunction f)
+        {
+            lua_pushcclosure(L, f, 0);
+        }
+
+        template<typename TRET, typename ...ARGS>
+        inline void push_function(lua_State* L, TRET(*f)(ARGS...))
+        {
+            push_holder(L, f);
+            lua_pushcclosure(L, NonMemberFunctionCaller(f), 1);
+        }
+
+        inline bool match_anything(lua_State*, int, int) { return true; }
+        inline OverloadMatcher matcher_of(lua_CFunction) { return &match_anything; }
+
+#if !LUAAA_WITHOUT_CPP_STDLIB
+        template<typename TRET, typename ...ARGS>
+        inline void push_function(lua_State* L, const std::function<TRET(ARGS...)>& f)
+        {
+            push_holder(L, f);
+            lua_pushcclosure(L, NonMemberFunctionCaller(f), 1);
+        }
+
+        // lambdas and other function objects
+        template<typename F>
+        inline void push_function(lua_State* L, F f)
+        {
+            push_function(L, to_function(f));
+        }
+
+        template<typename F>
+        inline OverloadMatcher matcher_of(F f)
+        {
+            return matcher_of(to_function(f));
+        }
+#endif
+    }
 
     //========================================================
     // export class
@@ -2273,21 +3146,11 @@ namespace LUAAA_NS
     template <typename TCLASS>
     struct LuaClass
     {
-        friend struct DestructorCaller<TCLASS>;
         template<typename, typename> friend struct LuaStack;
+        template<typename> friend struct LuaClass;
         friend struct LuaModule;
 
-        typedef struct _UserDataDetail {
-            TCLASS * obj;
-            int (*dtor)(_UserDataDetail*);
-            // Custom deleter, type-erased as a generic function pointer (a
-            // function-pointer <-> function-pointer round trip is always
-            // well-defined). It is stored BY VALUE: the object must not depend
-            // on any other Lua value staying alive to be destroyed -- the
-            // constructor closure that also knows the deleter can be collected
-            // first (e.g. `Class = nil`), long before the object is.
-            void (*free_func)();
-        } UserDataDetail;
+        typedef luaaa_detail::UserData UserDataDetail;
 
     public:
         LuaClass(lua_State * state, const char * name, const luaL_Reg * functions = nullptr)
@@ -2308,274 +3171,68 @@ namespace LUAAA_NS
             const char * existing = klassName(state);
             if (existing != nullptr && strcmp(existing, name) != 0)
             {
-#if LUAAA_WITHOUT_CPP_STDLIB
-                luaL_argcheck(state, false, 1, "LuaClass name conflict: this C++ type is already bound to another name in this state");
-#else
-                luaL_argcheck(state, false, 1, (std::string("C++ class `") + LUAAA_RTTI_CLASS_NAME(TCLASS) + "` bind to conflict lua name `" + name + "`, origin name: `" + existing + "`. bind it in a separate lua_State or wrap it in a distinct C++ type.").c_str());
-#endif
+                luaL_argerror(state, 1, lua_pushfstring(state, "C++ class `%s` bind to conflict lua name `%s`, origin name: `%s`. bind it in a separate lua_State or wrap it in a distinct C++ type.", LUAAA_RTTI_CLASS_NAME(TCLASS), name, existing));
                 return;
             }
 
-            struct HelperClass {
-                static int f__objgc(lua_State* state) {
-                    // Never raise out of __gc: during lua_close there is no pcall
-                    // to catch a luaL_error, so it would panic/abort the host.
-                    //
-                    // __gc is reachable from scripts too (obj:__gc(), or
-                    // getmetatable(obj).__gc(anything)), not only from the collector.
-                    // So (1) only trust a FULL userdata whose metatable carries this
-                    // type's tag -- anything else (a table made by luaaa:extend, a
-                    // foreign userdata such as io.stdout, a stripped metatable) is
-                    // not ours to reinterpret as UserDataDetail; and (2) finalize at
-                    // most once: obj/dtor are cleared afterwards, so a manual call
-                    // followed by the collector's call cannot destroy the object
-                    // twice, and LuaStack::get rejects the finalized object
-                    // ("invalid user data") instead of handing out a dead pointer.
-                    lua_settop(state, 1);                           // [ud]
-                    if (lua_type(state, 1) != LUA_TUSERDATA || !lua_getmetatable(state, 1))
-                    {
-                        return 0;
-                    }
-                    lua_rawgetp(state, 2, &s_typeKey);              // [ud, mt, tag]
-                    const bool ours = (lua_touserdata(state, -1) == (void*)&s_typeKey);
-                    lua_pop(state, 1);                              // [ud, mt]
-                    auto uData = (UserDataDetail*)lua_touserdata(state, 1);
-                    if (!ours || !uData || !uData->obj)
-                    {
-                        return 0;   // not our object, or already finalized
-                    }
-
-                    lua_getfield(state, 2, "!__gc");                // [ud, mt, fn]
-                    if (lua_isfunction(state, -1))
-                    {
-                        lua_insert(state, 1);                       // [fn, ud, mt]
-                        // do not propagate errors out of a __gc handler.
-                        lua_pcall(state, 2, 0, 0);
-                    }
-
-                    int (*dtor)(UserDataDetail*) = uData->dtor;
-                    uData->dtor = nullptr;
-                    if (dtor)
-                    {
-                        // __gc must not propagate exceptions: a C++ exception
-                        // out of a __gc handler crosses the extern "C" boundary
-                        // and terminates the host, and lua_error() inside __gc
-                        // is itself undefined per the Lua manual. So swallow
-                        // any exception here rather than translating it (H6).
-#if LUAAA_HAS_EXCEPTIONS
-                        try
-#endif
-                        {
-                            dtor(uData);
-                        }
-#if LUAAA_HAS_EXCEPTIONS
-                        catch (...) {
-                            // suppressed: see comment above
-                        }
-#endif
-                    }
-                    uData->obj = nullptr;   // finalized: never destroy or hand out again
-                    return 0;
-                }
-
-#if LUAAA_FEATURE_PROPERTY
-                // Lookup order for `obj[key]`:
-                //   string key : bound method/constant -> registered getter
-                //                -> user __index -> (setter only => write-only error) -> nil
-                //   number key : user __index -> nil        (e.g. an array-like class)
-                //   other keys : nil
-                // Methods and properties are named by STRINGS only. The key is never
-                // converted: lua_tostring on a number would rewrite the caller's
-                // value in place, so a user __index bound for obj[1] would be handed
-                // "1", and a lua-side (luaaa:extend) object would store t[1] under "1".
-                static int f_internal_index(lua_State* state)
-                {
-                    lua_settop(state, 2);                               // [self, key]
-                    const int keyType = lua_type(state, 2);
-                    if (keyType != LUA_TSTRING && keyType != LUA_TNUMBER)
-                    {
-                        lua_pushnil(state);
-                        return 1;
-                    }
-                    lua_getmetatable(state, 1);                         // [self, key, mt]
-                    const char* key = nullptr;
-                    char internal_name[256];
-                    if (keyType == LUA_TSTRING)
-                    {
-                        key = lua_tostring(state, 2);
-                        lua_pushvalue(state, 2);
-                        lua_rawget(state, 3);                           // [self, key, mt, value]
-                        if (!lua_isnil(state, -1))
-                        {
-                            return 1;
-                        }
-                        lua_pop(state, 1);
-
-                        MakeInternalPropName(state, internal_name, sizeof(internal_name), '<', key);
-                        lua_getfield(state, 3, internal_name);          // [self, key, mt, getter]
-                        if (lua_isfunction(state, -1))
-                        {
-                            lua_insert(state, 1);                       // [getter, self, key, mt]
-                            lua_call(state, 3, 1);
-                            return 1;
-                        }
-                        lua_pop(state, 1);
-                    }
-
-                    // user defined __index (function or table), given the ORIGINAL key
-                    lua_getfield(state, 3, "!__index");                 // [self, key, mt, handler]
-                    if (lua_isfunction(state, -1))
-                    {
-                        lua_insert(state, 1);                           // [handler, self, key, mt]
-                        lua_call(state, 3, 1);
-                        return 1;
-                    }
-                    if (lua_istable(state, -1))
-                    {
-                        lua_pushvalue(state, 2);
-                        lua_rawget(state, -2);
-                        return 1;
-                    }
-                    lua_pop(state, 1);                                  // [self, key, mt]
-
-                    if (key)
-                    {
-                        MakeInternalPropName(state, internal_name, sizeof(internal_name), '>', key);
-                        lua_getfield(state, 3, internal_name);
-                        if (lua_isfunction(state, -1))
-                        {
-                            // Yes, there are something write-only, e.g., stdout, printer, digital io pin in output mode.
-                            luaL_error(state, "attempt to read Write-Only property '%s' of '%s'", key, LuaClass<TCLASS>::klassName(state));
-                        }
-                    }
-                    lua_pushnil(state);                                 // non-existing: nil
-                    return 1;
-                }
-
-                // `obj[key] = value`:
-                //   string key : registered setter -> (below)
-                //   lua-side (luaaa:extend) object : plain field on the instance table
-                //   userdata   : user __newindex (string/number key, ORIGINAL key)
-                //                -> read-only / non-existing property error
-                static int f_internal_newindex(lua_State* state)
-                {
-                    lua_settop(state, 3);                               // [self, key, value]
-                    const int keyType = lua_type(state, 2);
-                    lua_getmetatable(state, 1);                         // [self, key, value, mt]
-                    const char* key = nullptr;
-                    char internal_name[256];
-                    if (keyType == LUA_TSTRING)
-                    {
-                        key = lua_tostring(state, 2);
-                        MakeInternalPropName(state, internal_name, sizeof(internal_name), '>', key);
-                        lua_getfield(state, 4, internal_name);          // [self, key, value, mt, setter]
-                        if (lua_isfunction(state, -1))
-                        {
-                            lua_insert(state, 1);                       // [setter, self, key, value, mt]
-                            lua_call(state, 4, 0);
-                            return 0;
-                        }
-                        lua_pop(state, 1);
-                    }
-
-                    if (lua_istable(state, 1))
-                    {
-                        lua_settop(state, 3);
-                        lua_rawset(state, 1);
-                        return 0;
-                    }
-
-                    if (keyType != LUA_TSTRING && keyType != LUA_TNUMBER)
-                    {
-                        return 0;   // no setter can match such a key: leave the assignment untouched
-                    }
-
-                    lua_getfield(state, 4, "!__newindex");              // [self, key, value, mt, handler]
-                    if (lua_isfunction(state, -1))
-                    {
-                        lua_insert(state, 1);                           // [handler, self, key, value, mt]
-                        lua_call(state, 4, 0);
-                        return 0;
-                    }
-                    if (lua_istable(state, -1))
-                    {
-                        lua_pushvalue(state, 2);
-                        lua_pushvalue(state, 3);
-                        lua_rawset(state, -3);
-                        return 0;
-                    }
-                    lua_pop(state, 1);                                  // [self, key, value, mt]
-
-                    if (key)
-                    {
-                        MakeInternalPropName(state, internal_name, sizeof(internal_name), '<', key);
-                        lua_getfield(state, 4, internal_name);
-                        if (lua_isfunction(state, -1))
-                        {
-                            luaL_error(state, "attempt to write Read-Only property '%s' of '%s'", key, LuaClass<TCLASS>::klassName(state));
-                        }
-                    }
-                    lua_pushvalue(state, 2);                            // a copy: only the copy gets stringified
-                    const char* shown = lua_tostring(state, -1);
-                    luaL_error(state, "attempt to access Non-existing property '%s' of '%s'", (shown ? shown : "?"), LuaClass<TCLASS>::klassName(state));
-                    return 0;
-                }
-#endif
-            };
-
-            // Object metatable, keyed by the lua name in this state's registry.
-            // Two DIFFERENT C++ types must never share one lua name in a state:
-            // luaL_checkudata matches by name, so both types' objects would pass
-            // each other's checks -> reinterpret UB. Tag the metatable with this
-            // type's key and reject foreign reuse (BEFORE recording our own name,
-            // so a rejected bind leaves no registration residue); re-binding the
-            // SAME type under its existing name (e.g. adding methods in a second
-            // block) is fine.
-            const int mtIndex = lua_gettop(state);
+            // Object metatable, also kept under the lua name in this state's
+            // registry (luaL_checkudata words its errors with that name).
+            // Two DIFFERENT C++ types must never share one lua name in a state.
+            // Tag the metatable with this type's key and reject foreign reuse
+            // (BEFORE recording our own name, so a rejected bind leaves no
+            // registration residue); re-binding the SAME type under its existing
+            // name (e.g. adding methods in a second block) is fine.
             if (luaL_newmetatable(state, name))
             {
-                // NOTE: index the metatable by its ABSOLUTE position -- the 5.1
-                // lua_rawgetp/lua_rawsetp polyfills resolve idx lazily, so a
-                // relative index would slide as the key is pushed.
+                const int mt = lua_gettop(state);
                 lua_pushlightuserdata(state, (void*)&s_typeKey);
-                lua_rawsetp(state, mtIndex + 1, &s_typeKey);   // metatable[&s_typeKey] = &s_typeKey
+                LUAAA_rawsetp(state, mt, &s_typeKey);                   // the type tag
+                lua_pushboolean(state, 1);
+                LUAAA_rawsetp(state, mt, luaaa_detail::ClassMetaTag()); // "a luaaa class"
+                for (int slot = luaaa_detail::MT_METHODS; slot <= luaaa_detail::MT_SETTERS; ++slot)
+                {
+                    lua_newtable(state);
+                    lua_rawseti(state, mt, slot);
+                }
+                lua_pushstring(state, name);
+                lua_setfield(state, mt, "__name");
+                lua_pushcfunction(state, &luaaa_detail::class_gc);
+                lua_setfield(state, mt, "__gc");
+                lua_rawgeti(state, mt, luaaa_detail::MT_METHODS);
+                lua_setfield(state, mt, "__index");                     // until a property / base / user __index needs class_index
+                lua_pushvalue(state, mt);
+                lua_pushcclosure(state, &luaaa_detail::class_newindex, 1);
+                lua_setfield(state, mt, "__newindex");
+#if LUAAA_PROTECT_METATABLE
+                lua_pushboolean(state, 0);
+                lua_setfield(state, mt, "__metatable");
+#endif
+                lua_pushvalue(state, mt);
+                LUAAA_rawsetp(state, LUA_REGISTRYINDEX, &s_metaKey);
             }
             else
             {
-                lua_rawgetp(state, mtIndex + 1, &s_typeKey);
+                LUAAA_rawgetp(state, lua_gettop(state), &s_typeKey);
                 const void * tag = lua_touserdata(state, -1);
                 lua_pop(state, 1);
-#if LUAAA_WITHOUT_CPP_STDLIB
-                luaL_argcheck(state, tag == (const void*)&s_typeKey, 1, "lua name already bound to a different cpp class");
-#else
-                luaL_argcheck(state, tag == (const void*)&s_typeKey, 1, (std::string("lua name `") + name + "` already bound to a different cpp class").c_str());
-#endif
+                if (tag != (const void*)&s_typeKey)
+                {
+                    luaL_argerror(state, 1, lua_pushfstring(state, "lua name `%s` already bound to a different cpp class", name));
+                }
             }
+            lua_pop(state, 1);
 
             // Record this type's lua name for the current state (registry[&s_typeKey]).
             setKlassName(state, name);
-            luaL_Reg objgc[] = {
-                { "__gc", HelperClass::f__objgc },
-#if LUAAA_FEATURE_PROPERTY
-                { "__index", HelperClass::f_internal_index },
-                { "__newindex", HelperClass::f_internal_newindex },
-#endif
-                { nullptr, nullptr }
-            };
-            luaL_setfuncs(state, objgc, 0);
-
-#if !LUAAA_FEATURE_PROPERTY
-            // if not register __index function, uncomment below codes
-            lua_pushvalue(state, -1);
-            lua_setfield(state, -2, "__index");
-#endif
 
             if (functions)
             {
-                luaL_setfuncs(state, functions, 0);
+                for (const luaL_Reg* reg = functions; reg->name != nullptr; ++reg)
+                {
+                    lua_pushcfunction(state, reg->func);
+                    _setMember(reg->name, nullptr);
+                }
             }
-
-            lua_pop(state, 1);
 
 #if LUAAA_FEATURE_EXTEND
             // any state that binds a class gets luaaa:extend / luaaa:base (once).
@@ -2589,732 +3246,344 @@ namespace LUAAA_NS
         {}
 #endif
 
+        //----------------------------------------------------
+        // inheritance
+        //----------------------------------------------------
+        // Declare BASE (a C++ base class of TCLASS that is already bound in
+        // this state) as the base of this class:
+        //   * an object of this class is accepted wherever a BASE is expected
+        //     (BASE&, const BASE&, BASE*, the `self` of BASE's functions), and
+        //   * BASE's functions, constants and properties are found on objects
+        //     of this class (what this class registers itself takes precedence).
+        // Call it once per base; bases of BASE are inherited with it.
+        template<typename BASE>
+        inline LuaClass<TCLASS>& inherit()
+        {
+            static_assert(std::is_base_of<BASE, TCLASS>::value && !std::is_same<BASE, TCLASS>::value,
+                "Error: inherit<BASE>() requires BASE to be a base class of the bound class");
+            struct Caster
+            {
+                static void* cast(void* p) { return static_cast<BASE*>(static_cast<TCLASS*>(p)); }
+            };
+            lua_State* L = m_state;
+            if (!LuaClass<BASE>::pushMetatable(L))
+            {
+                luaL_error(L, "luaaa: the base class of '%s' is not bound in this state; bind it before inherit<>()", klassName(L));
+                return (*this);
+            }
+            const int bmt = lua_gettop(L);                      // [bmt]
+            pushMetatable(L);                                   // [bmt, mt]
+            lua_rawgeti(L, bmt + 1, luaaa_detail::MT_BASES);
+            if (!lua_istable(L, -1))
+            {
+                lua_pop(L, 1);
+                lua_newtable(L);
+                lua_pushvalue(L, -1);
+                lua_rawseti(L, bmt + 1, luaaa_detail::MT_BASES);
+            }                                                   // [bmt, mt, bases]
+            const int n = (int)LUAAA_rawlen(L, bmt + 2);
+            lua_pushvalue(L, bmt);
+            lua_rawseti(L, bmt + 2, n + 1);
+            luaaa_detail::UpcastFn* caster = (luaaa_detail::UpcastFn*)lua_newuserdata(L, sizeof(luaaa_detail::UpcastFn));
+            *caster = &Caster::cast;
+            lua_rawseti(L, bmt + 2, n + 2);
+            _useIndexFunction(bmt + 1);
+            lua_settop(L, bmt - 1);
+            return (*this);
+        }
+
+        //----------------------------------------------------
+        // constructors (functions of the class table: Class.new(...))
+        //----------------------------------------------------
         template<typename ...ARGS>
         inline LuaClass<TCLASS>& ctor(const char * name = "new")
         {
-            struct HelperClass {
-                static int f_dtor(typename LuaClass<TCLASS>::UserDataDetail * uData) {
-                    if (uData && uData->obj)
-                    {
-                        (uData->obj)->~TCLASS();
-                    }
-                    return 0;
-                }
-
-                static int f_new(lua_State* state) {
-                    // Room for alignof(TCLASS)-1 bytes of padding: the object is
-                    // constructed right after UserDataDetail, which only guarantees
-                    // pointer alignment -- an over-aligned TCLASS (SIMD, alignas)
-                    // would otherwise be placement-new'd at a misaligned address (UB).
-                    PadMissingArgs<ARGS...>(state);
-                    auto uData = (typename LuaClass<TCLASS>::UserDataDetail*)lua_newuserdata(state, sizeof(LuaClass<TCLASS>::UserDataDetail) + (alignof(TCLASS) - 1) + sizeof(TCLASS));
-                    if (uData)
-                    {
-                        const uintptr_t aligned = (reinterpret_cast<uintptr_t>(uData + 1) + (alignof(TCLASS) - 1)) & ~(uintptr_t)(alignof(TCLASS) - 1);
-                        TCLASS * obj = PlacementConstructorCaller<TCLASS, ARGS...>::Invoke(state, (void*)aligned, 0);
-                        if (obj)
-                        {
-                            uData->obj = obj;
-                            uData->dtor = HelperClass::f_dtor;
-                            uData->free_func = nullptr;   // hygiene: leave no garbage field
-                            luaL_setmetatable(state, (LuaClass<TCLASS>::klassName(state)));
-                            return 1;
-                        }
-                        lua_pop(state, 1);
-                    }
-                    lua_pushnil(state);
-                    return 1;
-                }
-            };
-
             LUAAA_REPORT_CTOR_NAME_CONFLICT(name);
+            _pushPlacementCtor<ARGS...>();
+            return _setStatic(name, nullptr);
+        }
 
-            // The closure carries one upvalue (this type's key): a call boundary
-            // identifies itself by its upvalue 1 (see "error plumbing"), and a
-            // placement constructor has no callable holder to use for that.
-            luaL_Reg constructor[] = { { name, HelperClass::f_new }, { nullptr, nullptr } };
-#if LUAAA_USE_NEW_MODULE_REGISTRY
-            lua_getglobal(m_state, klassName(m_state));
-            if (lua_isnil(m_state, -1))
-            {
-                lua_pop(m_state, 1);
-                lua_newtable(m_state);
-            }
-            lua_pushlightuserdata(m_state, (void*)&s_typeKey);
-            luaL_setfuncs(m_state, constructor, 1);
-            lua_setglobal(m_state, klassName(m_state));
-#else
-            lua_pushlightuserdata(m_state, (void*)&s_typeKey);
-            luaL_openlib(m_state, klassName(m_state), constructor, 1);
-            lua_pop(m_state, 1);   // luaL_openlib leaves the class table on the stack
-#endif
-            return (*this);
+        // One more constructor under a name that already has one: the call
+        // picks the first whose parameters fit the arguments (see "overloads").
+        template<typename ...ARGS>
+        inline LuaClass<TCLASS>& overloadCtor(const char * name = "new")
+        {
+            _pushPlacementCtor<ARGS...>();
+            return _setStatic(name, &luaaa_detail::ArgsMatcher<ARGS...>::match);
         }
 
         template<typename ...ARGS>
         inline LuaClass<TCLASS>& ctor(const char * name, TCLASS*(*spawner)(ARGS...)) {
-            typedef decltype(spawner) SPAWNERFTYPE;
             struct HelperClass {
-                static int f_dtor(typename LuaClass<TCLASS>::UserDataDetail* uData) {
-                    if (uData && uData->obj)
-                    {
-                        DestructorCaller<TCLASS>::Invoke(uData->obj);
-                    }
-                    return 0;
-                }
-
                 static int f_new(lua_State* state) {
-                    void * spawner = lua_touserdata(state, lua_upvalueindex(1));
-                    luaL_argcheck(state, spawner, 1, "cpp closure spawner not found.");
-                    if (spawner) {
-                        PadMissingArgs<ARGS...>(state);
-                        auto uData = (typename LuaClass<TCLASS>::UserDataDetail*)lua_newuserdata(state, sizeof(LuaClass<TCLASS>::UserDataDetail));
-                        if (uData)
-                        {
-                            auto obj = LuaInvoke<TCLASS*, SPAWNERFTYPE, ARGS...>(state, spawner, 0);
-                            if (obj)
-                            {
-                                uData->obj = obj;
-                                uData->dtor = HelperClass::f_dtor;
-                                luaL_setmetatable(state, (LuaClass<TCLASS>::klassName(state)));
-                                return 1;
-                            }
-                            lua_pop(state, 1);
-                        }
-                    }
-                    lua_pushnil(state);
-                    return 1;
+                    return _spawn<ARGS...>(state, &LuaClass<TCLASS>::_dtorDelete, nullptr);
                 }
             };
-
             LUAAA_REPORT_CTOR_NAME_CONFLICT(name);
-
-            luaL_Reg constructor[] = { { name, HelperClass::f_new }, { nullptr, nullptr } };
-#if LUAAA_USE_NEW_MODULE_REGISTRY
-            lua_getglobal(m_state, klassName(m_state));
-            if (lua_isnil(m_state, -1))
-            {
-                lua_pop(m_state, 1);
-                lua_newtable(m_state);
-            }
-#endif
-
-            SPAWNERFTYPE * spawnerPtr = (SPAWNERFTYPE*)lua_newuserdata(m_state, sizeof(SPAWNERFTYPE));
-#if LUAAA_WITHOUT_CPP_STDLIB
-            luaL_argcheck(m_state, spawnerPtr != nullptr, 1, "failed to allocate memory to store spawner for ctor");
-#else
-            luaL_argcheck(m_state, spawnerPtr != nullptr, 1, (std::string("failed to allocate memory to store spawner for ctor `") + name + "`").c_str());
-#endif
-            if (!spawnerPtr)
-            {
-                lua_pop(m_state, 1);
-                return  (*this);
-            }
-
-            memset(spawnerPtr, 0, sizeof(SPAWNERFTYPE));
-            *spawnerPtr = spawner;
-
-#if LUAAA_USE_NEW_MODULE_REGISTRY
-            luaL_setfuncs(m_state, constructor, 1);
-            lua_setglobal(m_state, klassName(m_state));
-#else
-            luaL_openlib(m_state, klassName(m_state), constructor, 1);
-            lua_pop(m_state, 1);   // luaL_openlib leaves the class table on the stack
-#endif
-            return (*this);
+            luaaa_detail::push_holder(m_state, spawner);
+            lua_pushcclosure(m_state, &HelperClass::f_new, 1);
+            return _setStatic(name, nullptr);
         }
 
         template<typename TRET, typename ...ARGS>
         inline LuaClass<TCLASS>& ctor(const char * name, TCLASS*(*spawner)(ARGS...), TRET(*deleter)(TCLASS*)){
-            typedef decltype(spawner) SPAWNERFTYPE;
             typedef decltype(deleter) DELETERFTYPE;
-
             struct HelperClass {
-                static int f_dtor(typename LuaClass<TCLASS>::UserDataDetail* uData) {
-                    if (uData && uData->obj && uData->free_func)
+                static void f_dtor(luaaa_detail::UserData* uData) {
+                    if (uData->obj && uData->free_func)
                     {
-                        (reinterpret_cast<DELETERFTYPE>(uData->free_func))(uData->obj);
+                        (reinterpret_cast<DELETERFTYPE>(uData->free_func))(static_cast<TCLASS*>(uData->obj));
                     }
-                    return 0;
                 }
 
                 static int f_new(lua_State* state) {
-                    void * spawner = lua_touserdata(state, lua_upvalueindex(1));
-                    luaL_argcheck(state, spawner, 1, "cpp closure spawner not found.");
-
-                    void * deleter = lua_touserdata(state, lua_upvalueindex(2));
-                    luaL_argcheck(state, deleter, 2, "cpp closure deleter not found.");
-
-                    if (spawner) {
-                        PadMissingArgs<ARGS...>(state);
-                        auto uData = (typename LuaClass<TCLASS>::UserDataDetail*)lua_newuserdata(state, sizeof(LuaClass<TCLASS>::UserDataDetail));
-                        if (uData)
-                        {
-                            auto obj = LuaInvoke<TCLASS*, SPAWNERFTYPE, ARGS...>(state, spawner, 0);
-                            if (obj)
-                            {
-                                uData->obj = obj;
-                                uData->dtor = HelperClass::f_dtor;
-                                uData->free_func = reinterpret_cast<void(*)()>(*(DELETERFTYPE*)deleter);
-                                luaL_setmetatable(state, (LuaClass<TCLASS>::klassName(state)));
-                                return 1;
-                            }
-                            lua_pop(state, 1);
-                        }
-                    }
-                    lua_pushnil(state);
-                    return 1;
+                    void * deleterPtr = lua_touserdata(state, lua_upvalueindex(2));
+                    luaL_argcheck(state, deleterPtr, 2, "cpp closure deleter not found.");
+                    // The deleter is copied INTO the object: it must not depend on
+                    // this closure staying alive (`Class = nil` can collect it first).
+                    return _spawn<ARGS...>(state, &HelperClass::f_dtor, reinterpret_cast<void(*)()>(*(DELETERFTYPE*)deleterPtr));
                 }
             };
-
             LUAAA_REPORT_CTOR_NAME_CONFLICT(name);
-
-#if LUAAA_USE_NEW_MODULE_REGISTRY
-            lua_getglobal(m_state, klassName(m_state));
-            if (lua_isnil(m_state, -1))
-            {
-                lua_pop(m_state, 1);
-                lua_newtable(m_state);
-            }
-#endif
-
-            SPAWNERFTYPE * spawnerPtr = (SPAWNERFTYPE*)lua_newuserdata(m_state, sizeof(SPAWNERFTYPE));
-#if LUAAA_WITHOUT_CPP_STDLIB
-            luaL_argcheck(m_state, spawnerPtr != nullptr, 0, ("failed to allocate memory to store spawner for ctor"));
-#else
-            luaL_argcheck(m_state, spawnerPtr != nullptr, 0, (std::string("failed to allocate memory to store spawner for ctor `") + name + "`").c_str());
-#endif
-            if (!spawnerPtr)
-            {
-                lua_pop(m_state, 2);
-                return (*this);
-            }
-
-            memset(spawnerPtr, 0, sizeof(SPAWNERFTYPE));
-            *spawnerPtr = spawner;
-
-            DELETERFTYPE * deleterPtr = (DELETERFTYPE*)lua_newuserdata(m_state, sizeof(DELETERFTYPE));
-#if LUAAA_WITHOUT_CPP_STDLIB
-            luaL_argcheck(m_state, deleterPtr != nullptr, 0, ("failed to allocate memory to store deleter for ctor"));
-#else
-            luaL_argcheck(m_state, deleterPtr != nullptr, 0, (std::string("failed to allocate memory to store deleter for ctor `") + name + "`").c_str());
-#endif
-            if (!deleterPtr)
-            {
-                lua_pop(m_state, 3);
-                return (*this);
-            }
-
-            memset(deleterPtr, 0, sizeof(DELETERFTYPE));
-            *deleterPtr = deleter;
-
-            luaL_Reg constructor[] = { { name, HelperClass::f_new }, { nullptr, nullptr } };
-#if LUAAA_USE_NEW_MODULE_REGISTRY
-            luaL_setfuncs(m_state, constructor, 2);
-            lua_setglobal(m_state, klassName(m_state));
-#else
-            luaL_openlib(m_state, klassName(m_state), constructor, 2);
-            lua_pop(m_state, 1);   // luaL_openlib leaves the class table on the stack
-#endif
-            return (*this);
+            luaaa_detail::push_holder(m_state, spawner);
+            luaaa_detail::push_holder(m_state, deleter);
+            lua_pushcclosure(m_state, &HelperClass::f_new, 2);
+            return _setStatic(name, nullptr);
         }
 
         template<typename ...ARGS>
         inline LuaClass<TCLASS>& ctor(const char * name, TCLASS*(*spawner)(ARGS...), std::nullptr_t) {
-            typedef decltype(spawner) SPAWNERFTYPE;
-
             struct HelperClass {
                 static int f_new(lua_State* state) {
-                    void * spawner = lua_touserdata(state, lua_upvalueindex(1));
-                    luaL_argcheck(state, spawner, 1, "cpp closure spawner not found.");
-                    if (spawner) {
-                        PadMissingArgs<ARGS...>(state);
-                        auto uData = (typename LuaClass<TCLASS>::UserDataDetail*)lua_newuserdata(state, sizeof(LuaClass<TCLASS>::UserDataDetail));
-                        if (uData)
-                        {
-                            auto obj = LuaInvoke<TCLASS*, SPAWNERFTYPE, ARGS...>(state, spawner, 0);
-                            if (obj)
-                            {
-                                uData->obj = obj;
-                                uData->dtor = nullptr;
-                                luaL_setmetatable(state, (LuaClass<TCLASS>::klassName(state)));
-                                return 1;
-                            }
-                            lua_pop(state, 1);
-                        }
-                    }
-                    lua_pushnil(state);
-                    return 1;
+                    return _spawn<ARGS...>(state, nullptr, nullptr);    // never deleted by lua
                 }
-
             };
-
             LUAAA_REPORT_CTOR_NAME_CONFLICT(name);
-
-#if LUAAA_USE_NEW_MODULE_REGISTRY
-            lua_getglobal(m_state, klassName(m_state));
-            if (lua_isnil(m_state, -1))
-            {
-                lua_pop(m_state, 1);
-                lua_newtable(m_state);
-            }
-#endif
-            SPAWNERFTYPE * spawnerPtr = (SPAWNERFTYPE*)lua_newuserdata(m_state, sizeof(SPAWNERFTYPE));
-#if LUAAA_WITHOUT_CPP_STDLIB
-            luaL_argcheck(m_state, spawnerPtr != nullptr, 1, "failed to allocate memory to store spawner for ctor of cpp class");
-#else
-            luaL_argcheck(m_state, spawnerPtr != nullptr, 1, (std::string("failed to allocate memory to store spawner for ctor `") + name + "`").c_str());
-#endif
-            if (!spawnerPtr)
-            {
-                lua_pop(m_state, 1);
-                return (*this);
-            }
-
-            memset(spawnerPtr, 0, sizeof(SPAWNERFTYPE));
-            *spawnerPtr = spawner;
-
-            luaL_Reg constructor[] = { { name, HelperClass::f_new }, { nullptr, nullptr } };
-#if LUAAA_USE_NEW_MODULE_REGISTRY
-            luaL_setfuncs(m_state, constructor, 1);
-            lua_setglobal(m_state, klassName(m_state));
-#else
-            luaL_openlib(m_state, klassName(m_state), constructor, 1);
-            lua_pop(m_state, 1);   // luaL_openlib leaves the class table on the stack
-#endif
-            return (*this);
+            luaaa_detail::push_holder(m_state, spawner);
+            lua_pushcclosure(m_state, &HelperClass::f_new, 1);
+            return _setStatic(name, nullptr);
         }
 
-       
 #if !LUAAA_WITHOUT_CPP_STDLIB
+        // A factory returning std::shared_ptr<TCLASS>: the object is shared
+        // between C++ and lua, and can be passed to std::shared_ptr parameters.
+        template<typename ...ARGS>
+        inline LuaClass<TCLASS>& ctor(const char * name, std::shared_ptr<TCLASS>(*spawner)(ARGS...)) {
+            typedef decltype(spawner) SPAWNERFTYPE;
+            struct HelperClass {
+                static int f_new(lua_State* state) {
+                    void * spawnerPtr = lua_touserdata(state, lua_upvalueindex(1));
+                    luaL_argcheck(state, spawnerPtr, 1, "cpp closure spawner not found.");
+                    LuaStack<std::shared_ptr<TCLASS>>::put(state, LuaInvoke<std::shared_ptr<TCLASS>, SPAWNERFTYPE, ARGS...>(state, spawnerPtr, 0));
+                    return 1;
+                }
+            };
+            LUAAA_REPORT_CTOR_NAME_CONFLICT(name);
+            luaaa_detail::push_holder(m_state, spawner);
+            lua_pushcclosure(m_state, &HelperClass::f_new, 1);
+            return _setStatic(name, nullptr);
+        }
+
         template<typename ...ARGS>
         inline LuaClass<TCLASS>& ctor(const std::string& name)
         {
             return ctor<ARGS...>(name.c_str());
         }
 
-        template<typename ...ARGS>
-        inline LuaClass<TCLASS>& ctor(const std::string& name, TCLASS*(*spawner)(ARGS...)) {
-            return ctor(name.c_str(), spawner);
-        }
-
-        template<typename TRET, typename ...ARGS>
-        inline LuaClass<TCLASS>& ctor(const std::string& name, TCLASS*(*spawner)(ARGS...), TRET(*deleter)(TCLASS*)) {
-            return ctor(name.c_str(), spawner, deleter);
-        }
-
-        template<typename ...ARGS>
-        inline LuaClass<TCLASS>& ctor(const std::string& name, TCLASS*(*spawner)(ARGS...), std::nullptr_t) {
-            return ctor(name.c_str(), spawner, nullptr);
+        template<typename S, typename ...D>
+        inline LuaClass<TCLASS>& ctor(const std::string& name, S spawner, D... deleter) {
+            return ctor(name.c_str(), spawner, deleter...);
         }
 #endif
 
-    private:
-        template<typename F>
-        inline LuaClass<TCLASS>& _registerClassFunction(const char* name, lua_CFunction caller, F f)
-        {
-            luaL_getmetatable(m_state, klassName(m_state));
-            if (strcmp(name, "__gc") == 0)
-            {
-                lua_pushstring(m_state, "!__gc");
-            }
-#if LUAAA_FEATURE_PROPERTY
-            else if (strcmp(name, "__index") == 0)
-            {
-                lua_pushstring(m_state, "!__index");
-            }
-            else if (strcmp(name, "__newindex") == 0)
-            {
-                lua_pushstring(m_state, "!__newindex");
-            }
-#endif
-            else
-            {
-                lua_pushstring(m_state, name);
-            }
-
-            F* funPtr = (F*)lua_newuserdata(m_state, sizeof(F));
-#if LUAAA_WITHOUT_CPP_STDLIB
-            luaL_argcheck(m_state, funPtr != nullptr, 1, "failed to allocate memory to store function");
-#else
-            luaL_argcheck(m_state, funPtr != nullptr, 1, (std::string("failed to allocate memory to store function `") + name + "`").c_str());
-#endif
-            if (funPtr)
-            {
-                // placement-new: F may be non-trivially-copyable (e.g. std::function),
-                // memset + operator= on unconstructed storage would be UB.
-                new (funPtr) F(f);
-                AttachHolderFinalizer<F>(m_state);   // run ~F() when the holder is collected
-                lua_pushcclosure(m_state, caller, 1);
-                lua_settable(m_state, -3);
-                lua_pop(m_state, 1);
-            }
-            else
-            {
-                lua_pop(m_state, 2);
-            }
-            return (*this);
-        }
-
-    private:
-        template<typename F>
-        inline LuaClass<TCLASS>& _funImpl(const char * name, F f)
-        {
-            return _registerClassFunction(name, MemberFunctionCaller(f), f);
-        }
-
-    public:
-        template<typename FCLASS, typename FRET, typename ...FARGS>
-        inline LuaClass<TCLASS>& fun(const char * name, FRET(FCLASS::*f)(FARGS...))
-        {
-            return _funImpl(name, f);
-        }
-
-        template<typename FCLASS, typename FRET, typename ...FARGS>
-        inline LuaClass<TCLASS>& fun(const char * name, FRET(FCLASS::*f)(FARGS...) const)
-        {
-            return _funImpl(name, f);
-        }
-
-        template<typename FCLASS, typename ...FARGS>
-        inline LuaClass<TCLASS>& fun(const char * name, void(FCLASS::*f)(FARGS...))
-        {
-            return _funImpl(name, f);
-        }
-
-        template<typename FCLASS, typename ...FARGS>
-        inline LuaClass<TCLASS>& fun(const char * name, void(FCLASS::*f)(FARGS...) const)
-        {
-            return _funImpl(name, f);
-        }
-
-        template<typename FRET, typename ...FARGS>
-        inline LuaClass<TCLASS>& fun(const char * name, FRET(*f)(FARGS...))
-        {
-            return _funImpl(name, f);
-        }
-
-        template<typename ...FARGS>
-        inline LuaClass<TCLASS>& fun(const char * name, void(*f)(FARGS...))
-        {
-            return _funImpl(name, f);
-        }
-
-#if !LUAAA_WITHOUT_CPP_STDLIB
-        // register lambdas as lua class function
-        template<typename TRET, typename ...ARGS>
-        inline LuaClass<TCLASS>& fun(const char * name, const std::function<TRET(ARGS...)>& f)
-        {
-            return _funImpl<std::function<TRET(ARGS...)>>(name, f);
-        }
-
-        template<typename ...ARGS>
-        inline LuaClass<TCLASS>& fun(const char * name, const std::function<void(ARGS...)>& f)
-        {
-            return _funImpl<std::function<void(ARGS...)>>(name, f);
-        }
-
+        //----------------------------------------------------
+        // functions: obj:name(...)
+        //----------------------------------------------------
+        // `f` may be a member function of this class or of a base class of it,
+        // a free function, a std::function, a lambda, or a raw lua_CFunction.
+        // A free function / lambda does not receive `self`.
         template<typename F>
         inline LuaClass<TCLASS>& fun(const char * name, F f)
         {
-            return fun(name, to_function(f));
+            return _reg(name, f, false);
         }
-#endif
 
-        inline LuaClass<TCLASS>& fun(const char * name, lua_CFunction f)
+        // Like fun, but ADDS `f` to the functions already registered under
+        // `name` with overload(); the call picks the first one the arguments fit.
+        template<typename F>
+        inline LuaClass<TCLASS>& overload(const char * name, F f)
         {
-            luaL_getmetatable(m_state, klassName(m_state));
-            if (strcmp(name, "__gc") == 0)
-            {
-                lua_pushstring(m_state, "!__gc");
-            }
-#if LUAAA_FEATURE_PROPERTY
-            else if (strcmp(name, "__index") == 0)
-            {
-                lua_pushstring(m_state, "!__index");
-            }
-            else  if (strcmp(name, "__newindex") == 0)
-            {
-                lua_pushstring(m_state, "!__newindex");
-            }
-#endif
-            else
-            {
-                lua_pushstring(m_state, name);
-            }
-            lua_pushcclosure(m_state, f, 0);
-            lua_settable(m_state, -3);
-            lua_pop(m_state, 1);
-            return (*this);
+            return _reg(name, f, true);
         }
 
+        // A function of the class table: Class.name(...) -- no object involved.
+        template<typename F>
+        inline LuaClass<TCLASS>& staticFun(const char * name, F f)
+        {
+            luaaa_detail::push_function(m_state, f);
+            return _setStatic(name, nullptr);
+        }
+
+        // A constant found on every object: obj.name
         template <typename V>
         inline LuaClass<TCLASS>& def(const char * name, const V& val)
         {
-            luaL_getmetatable(m_state, klassName(m_state));
-            lua_pushstring(m_state, name);
             LuaStack<V>::put(m_state, val);
-            lua_settable(m_state, -3);
-            lua_pop(m_state, 1);
+            _setMember(name, nullptr);
             return (*this);
         }
 
         // disable cast from "const char [#]" to "char (*)[#]"
         inline LuaClass<TCLASS>& def(const char* name, const char* str)
         {
-            luaL_getmetatable(m_state, klassName(m_state));
-            lua_pushstring(m_state, name);
-            LuaStack<decltype(str)>::put(m_state, str);
-            lua_settable(m_state, -3);
-            lua_pop(m_state, 1);
+            lua_pushstring(m_state, str);
+            _setMember(name, nullptr);
             return (*this);
         }
-      
-    private:
-        template <typename F>
-        inline LuaClass<TCLASS>& _getterImpl(const char* name, lua_CFunction invoker, F f)
+
+        // A constant of the class table: Class.name
+        template <typename V>
+        inline LuaClass<TCLASS>& constant(const char * name, const V& val)
         {
-#if LUAAA_FEATURE_PROPERTY
-            char internal_name[256];
-            MakeInternalPropName(m_state, internal_name, sizeof(internal_name), '<', name);
-            return _registerClassFunction(internal_name, invoker, f);
-#else
-            return *this;
-#endif
+            LuaStack<V>::put(m_state, val);
+            return _setStatic(name, nullptr);
         }
 
-        template<typename F>
-        inline LuaClass<TCLASS>& _setterImpl(const char* name, lua_CFunction invoker, F f)
+        inline LuaClass<TCLASS>& constant(const char* name, const char* str)
+        {
+            lua_pushstring(m_state, str);
+            return _setStatic(name, nullptr);
+        }
+
+        //----------------------------------------------------
+        // properties: obj.name / obj.name = value
+        //----------------------------------------------------
+    private:
+        // How a getter / setter is called: MODE 0 = f(), 1 = f(self), 2 = (self.*f)()
+        // -- for a setter with the value (lua argument 3) as the last argument.
+        template<typename F, typename P, int MODE>
+        struct PropGet
+        {
+            static P call(lua_State*, F& f, std::integral_constant<int, 0>) { return f(); }
+            static P call(lua_State* state, F& f, std::integral_constant<int, 1>) { return f(LuaStack<TCLASS>::get(state, 1)); }
+            static P call(lua_State* state, F& f, std::integral_constant<int, 2>) { return (LuaStack<TCLASS>::get(state, 1).*f)(); }
+
+            static int Invoke(lua_State* state)
+            {
+                void* calleePtr = lua_touserdata(state, lua_upvalueindex(1));
+                if (!calleePtr)
+                {
+                    lua_pushnil(state);
+                    return 1;
+                }
+                LUAAA_TRY
+                {
+                    LuaStackReturn<P>(state, call(state, *(F*)calleePtr, std::integral_constant<int, MODE>()));
+                }
+                LUAAA_CATCH(state, "property getter")
+                return 1;
+            }
+        };
+
+        template<typename F, typename P, int MODE>
+        struct PropSet
+        {
+            static void call(lua_State* state, F& f, std::integral_constant<int, 0>) { f(LuaStack<P>::get(state, 3)); }
+            static void call(lua_State* state, F& f, std::integral_constant<int, 1>) { f(LuaStack<TCLASS>::get(state, 1), LuaStack<P>::get(state, 3)); }
+            static void call(lua_State* state, F& f, std::integral_constant<int, 2>) { (LuaStack<TCLASS>::get(state, 1).*f)(LuaStack<P>::get(state, 3)); }
+
+            static int Invoke(lua_State* state)
+            {
+                void* calleePtr = lua_touserdata(state, lua_upvalueindex(1));
+                if (calleePtr)
+                {
+                    LUAAA_TRY
+                    {
+                        call(state, *(F*)calleePtr, std::integral_constant<int, MODE>());
+                    }
+                    LUAAA_CATCH(state, "property setter")
+                }
+                return 0;
+            }
+        };
+
+        template <typename F>
+        inline LuaClass<TCLASS>& _property(int slot, const char* name, lua_CFunction invoker, const F& f)
         {
 #if LUAAA_FEATURE_PROPERTY
-            char internal_name[256];
-            MakeInternalPropName(m_state, internal_name, sizeof(internal_name), '>', name);
-            return _registerClassFunction(internal_name, invoker, f);
+            lua_State* L = m_state;
+            pushMetatable(L);                                   // [mt]
+            const int mt = lua_gettop(L);
+            lua_rawgeti(L, mt, slot);                           // [mt, props]
+            lua_pushstring(L, name);
+            luaaa_detail::push_holder(L, f);
+            lua_pushcclosure(L, invoker, 1);
+            lua_rawset(L, mt + 1);
+            _useIndexFunction(mt);
+            lua_settop(L, mt - 1);
 #else
-            return *this;
+            (void)slot; (void)name; (void)invoker; (void)f;
 #endif
+            return (*this);
         }
 
     public:
         template<typename P>
         inline LuaClass<TCLASS>& get(const char* name, P(*f)())
         {
-            struct HelperClass {
-                typedef decltype(f) FTYPE;
-                static inline int Invoke(lua_State* state) {
-                    void* calleePtr = lua_touserdata(state, lua_upvalueindex(1));
-                    if (calleePtr)
-                    {
-                        LUAAA_TRY
-                        {
-                            LuaStackReturn<P>(state, (*(FTYPE*)(calleePtr))());
-                        }
-                        LUAAA_CATCH(state, "property getter")
-                    }
-                    else
-                    {
-                        lua_pushnil(state);
-                    }
-                    return 1;
-                }
-            };
-            return _getterImpl(name, HelperClass::Invoke, f);
+            return _property(luaaa_detail::MT_GETTERS, name, &PropGet<P(*)(), P, 0>::Invoke, f);
         }
 
         template<typename P>
         inline LuaClass<TCLASS>& get(const char* name, P(*f)(const TCLASS&))
         {
-            struct HelperClass {
-                static inline int Invoke(lua_State* state) {
-                    typedef decltype(f) FTYPE;
-                    void* calleePtr = lua_touserdata(state, lua_upvalueindex(1));
-                    if (calleePtr)
-                    {
-                        LUAAA_TRY
-                        {
-                            LuaStackReturn<P>(state, (*(FTYPE*)(calleePtr))(LuaStack<TCLASS>::get(state, 1)));
-                        }
-                        LUAAA_CATCH(state, "property getter")
-                    }
-                    else
-                    {
-                        lua_pushnil(state);
-                    }
-                    return 1;
-                }
-            };
-            return _getterImpl(name, HelperClass::Invoke, f);
+            return _property(luaaa_detail::MT_GETTERS, name, &PropGet<P(*)(const TCLASS&), P, 1>::Invoke, f);
         }
 
         template<typename P, typename FCLASS>
         inline LuaClass<TCLASS>& get(const char* name, P(FCLASS::*f)()const)
         {
-            static_assert(std::is_same<typename std::decay<TCLASS>::type, typename std::decay<FCLASS>::type>::value, "Error: prop function can be member function of only associated class");
-            struct HelperClass {
-                static inline int Invoke(lua_State* state) {
-                    typedef decltype(f) FTYPE;
-                    void* calleePtr = lua_touserdata(state, lua_upvalueindex(1));
-                    if (calleePtr)
-                    {
-                        LUAAA_TRY
-                        {
-                            LuaStackReturn<P>(state, (LuaStack<TCLASS>::get(state, 1).**(FTYPE*)(calleePtr))());
-                        }
-                        LUAAA_CATCH(state, "property getter")
-                    }
-                    else
-                    {
-                        lua_pushnil(state);
-                    }
-                    return 1;
-                }
-            };
-            return _getterImpl(name, HelperClass::Invoke, f);
+            static_assert(std::is_base_of<FCLASS, TCLASS>::value, "Error: prop function can be member function of only associated class");
+            return _property(luaaa_detail::MT_GETTERS, name, &PropGet<P(FCLASS::*)()const, P, 2>::Invoke, f);
         }
-
 
         template<typename P, typename TRET>
         inline LuaClass<TCLASS>& set(const char* name, TRET(*f)(P))
         {
-            struct HelperClass {
-                static inline int Invoke(lua_State* state) {
-                    typedef decltype(f) FTYPE;
-                    void* calleePtr = lua_touserdata(state, lua_upvalueindex(1));
-                    if (calleePtr)
-                    {
-                        LUAAA_TRY
-                        {
-                            (*(FTYPE*)(calleePtr))(LuaStack<P>::get(state, 3));
-                        }
-                        LUAAA_CATCH(state, "property setter")
-                    }
-                    return 0;
-                }
-            };
-            return _setterImpl(name, HelperClass::Invoke, f);
+            return _property(luaaa_detail::MT_SETTERS, name, &PropSet<TRET(*)(P), P, 0>::Invoke, f);
         }
 
         template<typename P, typename TRET, typename FCLASS>
         inline LuaClass<TCLASS>& set(const char* name, TRET(FCLASS::* f)(P))
         {
-            static_assert(std::is_same<typename std::decay<TCLASS>::type, typename std::decay<FCLASS>::type>::value, "prop function can be member function of only associated class");
-            struct HelperClass {
-                static inline int Invoke(lua_State* state) {
-                    typedef decltype(f) FTYPE;
-                    void* calleePtr = lua_touserdata(state, lua_upvalueindex(1));
-                    if (calleePtr)
-                    {
-                        LUAAA_TRY
-                        {
-                            (LuaStack<TCLASS>::get(state, 1).**(FTYPE*)(calleePtr))(LuaStack<P>::get(state, 3));
-                        }
-                        LUAAA_CATCH(state, "property setter")
-                    }
-                    return 0;
-                }
-            };
-            return _setterImpl(name, HelperClass::Invoke, f);
+            static_assert(std::is_base_of<FCLASS, TCLASS>::value, "prop function can be member function of only associated class");
+            return _property(luaaa_detail::MT_SETTERS, name, &PropSet<TRET(FCLASS::*)(P), P, 2>::Invoke, f);
         }
 
         template<typename P, typename TRET>
         inline LuaClass<TCLASS>& set(const char* name, TRET(*f)(TCLASS&, P))
         {
-            struct HelperClass {
-                static inline int Invoke(lua_State* state) {
-                    typedef decltype(f) FTYPE;
-                    void* calleePtr = lua_touserdata(state, lua_upvalueindex(1));
-                    if (calleePtr)
-                    {
-                        LUAAA_TRY
-                        {
-                            (*(FTYPE*)(calleePtr))(LuaStack<TCLASS>::get(state, 1), LuaStack<P>::get(state, 3));
-                        }
-                        LUAAA_CATCH(state, "property setter")
-                    }
-                    return 0;
-                }
-            };
-            return _setterImpl(name, HelperClass::Invoke, f);
+            return _property(luaaa_detail::MT_SETTERS, name, &PropSet<TRET(*)(TCLASS&, P), P, 1>::Invoke, f);
         }
 
-
-    public:
 #if !LUAAA_WITHOUT_CPP_STDLIB
         // access prop from lambdas
         template<typename P>
         inline LuaClass<TCLASS>& get(const char* name, std::function<P()> f)
         {
-            struct HelperClass {
-                static inline int Invoke(lua_State* state) {
-                    typedef decltype(f) FTYPE;
-                    void* calleePtr = lua_touserdata(state, lua_upvalueindex(1));
-                    if (calleePtr)
-                    {
-                        LUAAA_TRY
-                        {
-                            LuaStackReturn<P>(state, (*(FTYPE*)(calleePtr))());
-                        }
-                        LUAAA_CATCH(state, "property getter")
-                    }
-                    else
-                    {
-                        lua_pushnil(state);
-                    }
-                    return 1;
-                }
-            };
-            return _getterImpl(name, HelperClass::Invoke, f);
+            return _property(luaaa_detail::MT_GETTERS, name, &PropGet<std::function<P()>, P, 0>::Invoke, f);
         }
 
         template<typename P>
         inline LuaClass<TCLASS>& get(const char* name, std::function<P(const TCLASS&)> f)
         {
-            struct HelperClass {
-
-                static inline int Invoke(lua_State* state) {
-                    typedef decltype(f) FTYPE;
-                    void* calleePtr = lua_touserdata(state, lua_upvalueindex(1));
-                    if (calleePtr)
-                    {
-                        LUAAA_TRY
-                        {
-                            LuaStackReturn<P>(state, (*(FTYPE*)(calleePtr))(LuaStack<TCLASS>::get(state, 1)));
-                        }
-                        LUAAA_CATCH(state, "property getter")
-                    }
-                    else
-                    {
-                        lua_pushnil(state);
-                    }
-                    return 1;
-                }
-            };
-            return _getterImpl(name, HelperClass::Invoke, f);
+            return _property(luaaa_detail::MT_GETTERS, name, &PropGet<std::function<P(const TCLASS&)>, P, 1>::Invoke, f);
         }
 
         template<typename P>
         inline LuaClass<TCLASS>& get(const char* name, std::function<P(TCLASS&)> f)
         {
-            struct HelperClass {
-                static inline int Invoke(lua_State* state) {
-                    typedef decltype(f) FTYPE;
-                    void* calleePtr = lua_touserdata(state, lua_upvalueindex(1));
-                    if (calleePtr)
-                    {
-                        LUAAA_TRY
-                        {
-                            LuaStackReturn<P>(state, (*(FTYPE*)(calleePtr))(LuaStack<TCLASS>::get(state, 1)));
-                        }
-                        LUAAA_CATCH(state, "property getter")
-                    }
-                    else
-                    {
-                        lua_pushnil(state);
-                    }
-                    return 1;
-                }
-            };
-            return _getterImpl(name, HelperClass::Invoke, f);
+            return _property(luaaa_detail::MT_GETTERS, name, &PropGet<std::function<P(TCLASS&)>, P, 1>::Invoke, f);
         }
 
         template<typename F>
@@ -3326,93 +3595,55 @@ namespace LUAAA_NS
         template<typename P, typename TRET>
         inline LuaClass<TCLASS>& set(const char* name, std::function<TRET(P)> f)
         {
-            struct HelperClass {
-                static inline int Invoke(lua_State* state) {
-                    typedef decltype(f) FTYPE;
-                    void* calleePtr = lua_touserdata(state, lua_upvalueindex(1));
-                    if (calleePtr)
-                    {
-                        LUAAA_TRY
-                        {
-                            (*(FTYPE*)(calleePtr))(LuaStack<P>::get(state, 3));
-                        }
-                        LUAAA_CATCH(state, "property setter")
-                    }
-                    return 0;
-                }
-            };
-            return _setterImpl(name, HelperClass::Invoke, f);
+            return _property(luaaa_detail::MT_SETTERS, name, &PropSet<std::function<TRET(P)>, P, 0>::Invoke, f);
         }
 
         template<typename P, typename TRET>
         inline LuaClass<TCLASS>& set(const char* name, std::function<TRET(TCLASS&, P)> f)
         {
-            struct HelperClass {
-                static inline int Invoke(lua_State* state) {
-                    typedef decltype(f) FTYPE;
-                    void* calleePtr = lua_touserdata(state, lua_upvalueindex(1));
-                    if (calleePtr)
-                    {
-                        LUAAA_TRY
-                        {
-                            (*(FTYPE*)(calleePtr))(LuaStack<TCLASS>::get(state, 1), LuaStack<P>::get(state, 3));
-                        }
-                        LUAAA_CATCH(state, "property setter")
-                    }
-                    return 0;
-                }
-            };
-            return _setterImpl(name, HelperClass::Invoke, f);
+            return _property(luaaa_detail::MT_SETTERS, name, &PropSet<std::function<TRET(TCLASS&, P)>, P, 1>::Invoke, f);
         }
 
         template<typename P, typename TRET>
         inline LuaClass<TCLASS>& set(const char* name, std::function<TRET(const TCLASS&, P)> f)
         {
-            struct HelperClass {
-                static inline int Invoke(lua_State* state) {
-                    typedef decltype(f) FTYPE;
-                    void* calleePtr = lua_touserdata(state, lua_upvalueindex(1));
-                    if (calleePtr)
-                    {
-                        LUAAA_TRY
-                        {
-                            (*(FTYPE*)(calleePtr))(LuaStack<TCLASS>::get(state, 1), LuaStack<P>::get(state, 3));
-                        }
-                        LUAAA_CATCH(state, "property setter")
-                    }
-                    return 0;
-                }
-            };
-            return _setterImpl(name, HelperClass::Invoke, f);
+            return _property(luaaa_detail::MT_SETTERS, name, &PropSet<std::function<TRET(const TCLASS&, P)>, P, 1>::Invoke, f);
         }
-
-        //template<typename F>
-        //inline LuaClass<TCLASS>& set(const char* name, std::function<F> f)
-        //{
-        //    //static_assert(false, "Error: invalid signature of setter function");
-        //    assert(!"Error: invalid signature of setter function");
-        //    return (*this);
-        //}
 
         template<typename F>
         inline LuaClass<TCLASS>& set(const char* name, F f)
         {
             return set(name, to_class_setter_function<TCLASS>(f));
         }
-#endif
 
-    public:
-#if !LUAAA_WITHOUT_CPP_STDLIB
         template <typename F>
         inline LuaClass<TCLASS>& fun(const std::string& name, F f)
         {
             return fun(name.c_str(), f);
         }
 
+        template <typename F>
+        inline LuaClass<TCLASS>& overload(const std::string& name, F f)
+        {
+            return overload(name.c_str(), f);
+        }
+
+        template <typename F>
+        inline LuaClass<TCLASS>& staticFun(const std::string& name, F f)
+        {
+            return staticFun(name.c_str(), f);
+        }
+
         template <typename V>
         inline LuaClass<TCLASS>& def(const std::string& name, const V& val)
         {
             return def(name.c_str(), val);
+        }
+
+        template <typename V>
+        inline LuaClass<TCLASS>& constant(const std::string& name, const V& val)
+        {
+            return constant(name.c_str(), val);
         }
 
         template <typename F>
@@ -3428,35 +3659,258 @@ namespace LUAAA_NS
         }
 #endif
 
-    private:
-        lua_State * m_state;
+    public:
+        // The address that identifies this C++ type (see s_typeKey).
+        static const void * typeKey() { return &s_typeKey; }
 
-    private:
-        // A per-TCLASS unique id: its address is used as a registry key. The lua
-        // name is stored per-state at registry[&s_typeKey], so the same C++ type can be
-        // bound under different names in different (even coexisting) lua_States.
-        static char s_typeKey;
+        // Is this type bound in the given state?
+        static bool isBound(lua_State * L) {
+            LUAAA_rawgetp(L, LUA_REGISTRYINDEX, &s_metaKey);
+            const bool bound = lua_istable(L, -1);
+            lua_pop(L, 1);
+            return bound;
+        }
+
+        // Push this type's metatable in the given state; pushes nothing and
+        // returns false when the type is not bound there.
+        static bool pushMetatable(lua_State * L) {
+            LUAAA_rawgetp(L, LUA_REGISTRYINDEX, &s_metaKey);
+            if (lua_istable(L, -1))
+            {
+                return true;
+            }
+            lua_pop(L, 1);
+            return false;
+        }
 
         // name of this type in the given state, or nullptr if not registered there.
         static const char * klassName(lua_State * L) {
-            lua_rawgetp(L, LUA_REGISTRYINDEX, &s_typeKey);
+            LUAAA_rawgetp(L, LUA_REGISTRYINDEX, &s_typeKey);
             const char * name = lua_tostring(L, -1);   // nil -> nullptr
             lua_pop(L, 1);
             return name;
         }
 
+    private:
+        //----------------------------------------------------
+        // registration plumbing
+        //----------------------------------------------------
+        // metatable.__index = class_index (instead of the bare methods table).
+        void _useIndexFunction(int mt)
+        {
+            lua_pushvalue(m_state, mt);
+            lua_pushcclosure(m_state, &luaaa_detail::class_index, 1);
+            lua_setfield(m_state, mt, "__index");
+        }
+
+        // table[name] = value (stack index v), or one more overload of it.
+        void _store(int table, const char* name, int v, luaaa_detail::OverloadMatcher matcher, int skip)
+        {
+            lua_State* L = m_state;
+            if (matcher)
+            {
+                lua_pushvalue(L, table);
+                lua_pushvalue(L, v);
+                luaaa_detail::add_overload(L, name, matcher, skip);
+                lua_pop(L, 1);
+            }
+            else
+            {
+                lua_pushstring(L, name);
+                lua_pushvalue(L, v);
+                lua_rawset(L, table);
+            }
+        }
+
+        // Register the value on top of the stack (popped) as a member:
+        //   __gc / __index / __newindex : the user's handler, called by ours
+        //   other "__name"              : a metamethod -- into the metatable,
+        //                                 where Lua looks for it (and also
+        //                                 reachable as obj.__name)
+        //   anything else               : into the methods table
+        void _setMember(const char* name, luaaa_detail::OverloadMatcher matcher)
+        {
+            lua_State* L = m_state;
+            const int v = lua_gettop(L);
+            if (!pushMetatable(L))
+            {
+                lua_settop(L, v - 1);
+                return;
+            }
+            const int mt = v + 1;
+            if (strcmp(name, "__gc") == 0 || strcmp(name, "__index") == 0 || strcmp(name, "__newindex") == 0)
+            {
+                lua_pushfstring(L, "!%s", name);
+                lua_pushvalue(L, v);
+                lua_rawset(L, mt);
+                if (strcmp(name, "__index") == 0)
+                {
+                    _useIndexFunction(mt);
+                }
+            }
+            else
+            {
+                if (name[0] == '_' && name[1] == '_')
+                {
+                    _store(mt, name, v, matcher, 1);
+                }
+                lua_rawgeti(L, mt, luaaa_detail::MT_METHODS);
+                _store(mt + 1, name, v, matcher, 1);
+            }
+            lua_settop(L, v - 1);
+        }
+
+        // Register the value on top of the stack (popped) in the class table.
+        LuaClass<TCLASS>& _setStatic(const char* name, luaaa_detail::OverloadMatcher matcher)
+        {
+            lua_State* L = m_state;
+            const int v = lua_gettop(L);
+            luaaa_detail::push_named_table(L, klassName(L));    // [v, classTable]
+            _store(v + 1, name, v, matcher, 0);
+            lua_settop(L, v - 1);
+            return (*this);
+        }
+
+        template<typename F>
+        inline LuaClass<TCLASS>& _bind(const char* name, lua_CFunction caller, const F& f, luaaa_detail::OverloadMatcher matcher)
+        {
+            luaaa_detail::push_holder(m_state, f);
+            lua_pushcclosure(m_state, caller, 1);
+            _setMember(name, matcher);
+            return (*this);
+        }
+
+        // `self` is read as the class being bound when the member belongs to
+        // one of its base classes, so that base need not be bound itself.
+        template<typename FCLASS>
+        struct SelfOf : std::conditional<std::is_base_of<FCLASS, TCLASS>::value, TCLASS, FCLASS> {};
+
+        template<typename FCLASS, typename FRET, typename ...FARGS>
+        inline LuaClass<TCLASS>& _reg(const char * name, FRET(FCLASS::*f)(FARGS...), bool overloaded)
+        {
+            return _bind(name, MethodCaller<typename SelfOf<FCLASS>::type>(f), f, overloaded ? luaaa_detail::matcher_of(f) : nullptr);
+        }
+
+        template<typename FCLASS, typename FRET, typename ...FARGS>
+        inline LuaClass<TCLASS>& _reg(const char * name, FRET(FCLASS::*f)(FARGS...) const, bool overloaded)
+        {
+            return _bind(name, MethodCaller<typename SelfOf<FCLASS>::type>(f), f, overloaded ? luaaa_detail::matcher_of(f) : nullptr);
+        }
+
+        template<typename FRET, typename ...FARGS>
+        inline LuaClass<TCLASS>& _reg(const char * name, FRET(*f)(FARGS...), bool overloaded)
+        {
+            return _bind(name, MemberFunctionCaller(f), f, overloaded ? luaaa_detail::matcher_of(f) : nullptr);
+        }
+
+        inline LuaClass<TCLASS>& _reg(const char * name, lua_CFunction f, bool overloaded)
+        {
+            lua_pushcclosure(m_state, f, 0);
+            _setMember(name, overloaded ? &luaaa_detail::match_anything : nullptr);
+            return (*this);
+        }
+
+#if !LUAAA_WITHOUT_CPP_STDLIB
+        template<typename TRET, typename ...ARGS>
+        inline LuaClass<TCLASS>& _reg(const char * name, const std::function<TRET(ARGS...)>& f, bool overloaded)
+        {
+            return _bind(name, MemberFunctionCaller(f), f, overloaded ? luaaa_detail::matcher_of(f) : nullptr);
+        }
+
+        // lambdas and other function objects
+        template<typename F>
+        inline LuaClass<TCLASS>& _reg(const char * name, F f, bool overloaded)
+        {
+            return _reg(name, to_function(f), overloaded);
+        }
+#endif
+
+        template<typename ...ARGS>
+        inline void _pushPlacementCtor()
+        {
+            struct HelperClass {
+                static int f_new(lua_State* state) {
+                    // The object is constructed inside the userdata, right after
+                    // the UserData block, with room for alignof(TCLASS)-1 bytes of
+                    // padding: an over-aligned TCLASS (SIMD, alignas) must not be
+                    // placement-new'd at a misaligned address.
+                    PadMissingArgs<ARGS...>(state);
+                    luaaa_detail::UserData* uData = luaaa_detail::new_userdata(state, (alignof(TCLASS) - 1) + sizeof(TCLASS));
+                    TCLASS * obj = PlacementConstructorCaller<TCLASS, ARGS...>::Invoke(state, luaaa_detail::payload(uData, alignof(TCLASS)), 0);
+                    uData->obj = obj;
+                    uData->dtor = &luaaa_detail::destroy_in_place<TCLASS>;
+                    pushMetatable(state);
+                    lua_setmetatable(state, -2);
+                    return 1;
+                }
+            };
+            // The closure carries one upvalue (this type's key): a call boundary
+            // identifies itself by its upvalue 1 (see "error plumbing"), and a
+            // placement constructor has no callable holder to use for that.
+            lua_pushlightuserdata(m_state, (void*)&s_typeKey);
+            lua_pushcclosure(m_state, &HelperClass::f_new, 1);
+        }
+
+        // Body of the spawner-based constructors: call the spawner held in
+        // upvalue 1 and wrap the object it returns (nil when it returns nullptr).
+        template<typename ...ARGS>
+        static int _spawn(lua_State* state, void (*dtor)(luaaa_detail::UserData*), void (*free_func)())
+        {
+            typedef TCLASS*(*SPAWNERFTYPE)(ARGS...);
+            void * spawner = lua_touserdata(state, lua_upvalueindex(1));
+            luaL_argcheck(state, spawner, 1, "cpp closure spawner not found.");
+            PadMissingArgs<ARGS...>(state);
+            luaaa_detail::UserData* uData = luaaa_detail::new_userdata(state, 0);
+            TCLASS * obj = LuaInvoke<TCLASS*, SPAWNERFTYPE, ARGS...>(state, spawner, 0);
+            if (!obj)
+            {
+                lua_pushnil(state);
+                return 1;
+            }
+            uData->obj = obj;
+            uData->dtor = dtor;
+            uData->free_func = free_func;
+            pushMetatable(state);
+            lua_setmetatable(state, -2);
+            return 1;
+        }
+
+        static void _dtorDelete(luaaa_detail::UserData* uData)
+        {
+            DestructorCaller<TCLASS>::Invoke(static_cast<TCLASS*>(uData->obj));
+        }
+
         static void setKlassName(lua_State * L, const char * name) {
             lua_pushstring(L, name);
-            lua_rawsetp(L, LUA_REGISTRYINDEX, &s_typeKey);
+            LUAAA_rawsetp(L, LUA_REGISTRYINDEX, &s_typeKey);
         }
+
+    private:
+        lua_State * m_state;
+
+        // Two per-TCLASS unique ids; their ADDRESSES are used as keys.
+        //   registry[&s_typeKey]  = the lua name of the type in that state, so the
+        //                           same C++ type can be bound under different names
+        //                           in different (even coexisting) lua_States;
+        //   metatable[&s_typeKey] = the type tag LuaStack<>::get checks;
+        //   registry[&s_metaKey]  = the metatable.
+        static char s_typeKey;
+        static char s_metaKey;
     };
 
     template <typename TCLASS> char LuaClass<TCLASS>::s_typeKey = 0;
+    template <typename TCLASS> char LuaClass<TCLASS>::s_metaKey = 0;
 
 
     // -----------------------------------
     // export module
     // -----------------------------------
+    // A module is a plain table: "_G" (the default) is the globals table,
+    // "a.b" is _G.a.b. Functions and values are stored in it directly. Nothing
+    // else is touched -- in particular the table gets a metatable only when the
+    // first PROPERTY (get / set) or a user __index / __newindex handler is
+    // registered on it, because nothing else needs one. A table that already carries someone else's metatable is left
+    // alone: properties are then unavailable on it.
     struct LuaModule
     {
     public:
@@ -3470,7 +3924,8 @@ namespace LUAAA_NS
             size_t strBufLen = strlen(name) + 1;
             m_moduleName = new char[strBufLen];
             memcpy(m_moduleName, name, strBufLen);
-            def("__name", m_moduleName);
+            luaaa_detail::push_named_table(m_state, m_moduleName);      // create it
+            lua_pop(m_state, 1);
         }
 
 #if !LUAAA_WITHOUT_CPP_STDLIB
@@ -3494,514 +3949,173 @@ namespace LUAAA_NS
         LuaModule& operator=(const LuaModule&) = delete;
 
     private:
-        // Push this state's module metatable (created on first use).
-        // ONE metatable serves every module: the dispatchers keep no per-module
-        // state -- property closures and `__name` live in the module table itself.
-        // It is kept in the registry under a private address key, NOT under the
-        // module's name: luaL_newmetatable(L, name) shares its namespace with the
-        // class metatables, so a module named like a class (the natural way to
-        // hang static helpers on the class table, `LuaModule(L, "Cat")`) used to
-        // fetch the CLASS metatable and overwrite its __index/__newindex.
-        static void _pushModuleMetaTable(lua_State * state) {
-            struct HelperClass {
-#if LUAAA_FEATURE_PROPERTY
-                // `mod[key]` for a key that is absent from the module table:
-                //   string key : registered getter -> user __index
-                //                -> (setter only => write-only error) -> nil
-                //   number key : user __index -> nil
-                //   other keys : nil
-                // The key is never converted (see LuaClass::f_internal_index).
-                static int f_internal_index(lua_State* state)
-                {
-                    lua_settop(state, 2);                               // [mod, key]
-                    const int keyType = lua_type(state, 2);
-                    if (keyType != LUA_TSTRING && keyType != LUA_TNUMBER)
-                    {
-                        lua_pushnil(state);
-                        return 1;
-                    }
-                    const char* key = nullptr;
-                    char internal_name[256];
-                    if (keyType == LUA_TSTRING)
-                    {
-                        // property getter/setter and functions are stored in the
-                        // module table itself, so look them up there.
-                        key = lua_tostring(state, 2);
-                        MakeInternalPropName(state, internal_name, sizeof(internal_name), '<', key);
-                        lua_pushstring(state, internal_name);
-                        lua_rawget(state, 1);                           // [mod, key, getter]
-                        if (lua_isfunction(state, -1))
-                        {
-                            lua_insert(state, 1);                       // [getter, mod, key]
-                            lua_call(state, 2, 1);
-                            return 1;
-                        }
-                        lua_pop(state, 1);
-                    }
-
-                    // user defined __index (function or table), given the ORIGINAL key
-                    lua_pushstring(state, "__index");
-                    lua_rawget(state, 1);                               // [mod, key, handler]
-                    if (lua_isfunction(state, -1))
-                    {
-                        lua_pushvalue(state, 1);
-                        lua_pushvalue(state, 2);
-                        lua_call(state, 2, 1);
-                        return 1;
-                    }
-                    if (lua_istable(state, -1))
-                    {
-                        lua_pushvalue(state, 2);
-                        lua_rawget(state, -2);
-                        return 1;
-                    }
-                    lua_pop(state, 1);                                  // [mod, key]
-
-                    if (key)
-                    {
-                        // no custom __index: distinguish write-only from non-existing
-                        MakeInternalPropName(state, internal_name, sizeof(internal_name), '>', key);
-                        lua_pushstring(state, internal_name);
-                        lua_rawget(state, 1);
-                        if (lua_isfunction(state, -1))
-                        {
-                            lua_pushstring(state, "__name");
-                            lua_rawget(state, 1);
-                            luaL_error(state, "attempt to read Write-Only property '%s' of '%s'", key, luaL_optstring(state, -1, "?"));
-                        }
-                    }
-                    lua_pushnil(state);                                 // non-existing: nil
-                    return 1;
-                }
-
-                // `mod[key] = value` for a key that is absent from the module table:
-                //   string key : registered setter -> (getter only => read-only error)
-                //   then       : user __newindex (function or table)
-                //                -> plain assignment, under the ORIGINAL key
-                static int f_internal_newindex(lua_State* state)
-                {
-                    lua_settop(state, 3);                               // [mod, key, value]
-                    if (lua_type(state, 2) == LUA_TSTRING)
-                    {
-                        const char* key = lua_tostring(state, 2);
-                        char internal_name[256];
-                        MakeInternalPropName(state, internal_name, sizeof(internal_name), '>', key);
-                        lua_pushstring(state, internal_name);
-                        lua_rawget(state, 1);                           // [mod, key, value, setter]
-                        if (lua_isfunction(state, -1))
-                        {
-                            lua_insert(state, 1);                       // [setter, mod, key, value]
-                            lua_call(state, 3, 0);
-                            return 0;
-                        }
-                        lua_pop(state, 1);
-
-                        MakeInternalPropName(state, internal_name, sizeof(internal_name), '<', key);
-                        lua_pushstring(state, internal_name);
-                        lua_rawget(state, 1);
-                        if (lua_isfunction(state, -1))
-                        {
-                            lua_pushstring(state, "__name");
-                            lua_rawget(state, 1);
-                            luaL_error(state, "attempt to write Read-Only property '%s' of '%s'", key, luaL_optstring(state, -1, "?"));
-                        }
-                        lua_pop(state, 1);                              // [mod, key, value]
-                    }
-
-                    // no associated property: user defined __newindex, else the module itself
-                    lua_pushstring(state, "__newindex");
-                    lua_rawget(state, 1);                               // [mod, key, value, handler]
-                    if (lua_isfunction(state, -1))
-                    {
-                        lua_insert(state, 1);                           // [handler, mod, key, value]
-                        lua_call(state, 3, 0);
-                        return 0;
-                    }
-                    if (lua_istable(state, -1))
-                    {
-                        lua_replace(state, 1);                          // [handler, key, value]
-                        lua_rawset(state, 1);
-                        return 0;
-                    }
-                    lua_pop(state, 1);                                  // [mod, key, value]
-                    lua_rawset(state, 1);
-                    return 0;
-                }
-#endif
-            };
-
-            static char s_moduleMetaKey = 0;
-            lua_rawgetp(state, LUA_REGISTRYINDEX, &s_moduleMetaKey);   // (returns void on 5.2: test the value)
-            if (lua_istable(state, -1))
+        // Push the metatable of the module table at absolute index `module`,
+        // giving it our dispatching one if it has none. Returns false (and
+        // still pushes the metatable) when the table carries a foreign one.
+        bool _pushMeta(int module)
+        {
+            lua_State* L = m_state;
+            if (!lua_getmetatable(L, module))
             {
-                return;                                             // [.., mt]
+                lua_newtable(L);
+                const int mt = lua_gettop(L);
+                lua_pushboolean(L, 1);
+                LUAAA_rawsetp(L, mt, luaaa_detail::ModuleMetaTag());
+                lua_newtable(L);
+                lua_rawseti(L, mt, 1);                          // getters
+                lua_newtable(L);
+                lua_rawseti(L, mt, 2);                          // setters
+                lua_pushstring(L, m_moduleName);
+                lua_setfield(L, mt, "__name");
+                lua_pushvalue(L, mt);
+                lua_pushcclosure(L, &luaaa_detail::module_index, 1);
+                lua_setfield(L, mt, "__index");
+                lua_pushvalue(L, mt);
+                lua_pushcclosure(L, &luaaa_detail::module_newindex, 1);
+                lua_setfield(L, mt, "__newindex");
+                lua_pushvalue(L, mt);
+                lua_setmetatable(L, module);
+                return true;
             }
-            lua_pop(state, 1);
-            lua_newtable(state);                                    // [.., mt]
-            luaL_Reg objfunc[] = {
-#if LUAAA_FEATURE_PROPERTY
-                { "__index", HelperClass::f_internal_index },
-                { "__newindex", HelperClass::f_internal_newindex },
-#endif
-                { nullptr, nullptr }
-            };
-            luaL_setfuncs(state, objfunc, 0);
-            lua_pushvalue(state, -1);
-            lua_rawsetp(state, LUA_REGISTRYINDEX, &s_moduleMetaKey);
+            LUAAA_rawgetp(L, lua_gettop(L), luaaa_detail::ModuleMetaTag());
+            const bool ours = (lua_toboolean(L, -1) != 0);
+            lua_pop(L, 1);
+            return ours;
         }
 
-        // Attach our property-dispatch metatable to the module table (expected on
-        // top of the stack) unless it already has one. This must run on EVERY
-        // registration, not only when the global table is first created: the
-        // default module "_G" (and any table the script pre-created, e.g.
-        // `M = {}`) already exists, and without the metatable its `<name`/`>name`
-        // property closures have no __index/__newindex to dispatch through --
-        // reads silently yield nil and writes become plain assignments.
-        // A table carrying a FOREIGN metatable (installed by the host app or
-        // another library) is left untouched: we must not clobber someone else's
-        // metatable; module properties simply stay unavailable there.
-        void _ensureMetaTable(lua_State * state) {
-            if (lua_getmetatable(state, -1)) {            // [mod, mt]: ours already, or foreign
-                lua_pop(state, 1);
-                return;
-            }
-            _pushModuleMetaTable(state);                  // [mod, ours]
-            lua_setmetatable(state, -2);                  // [mod]
-        }
-
-        template<typename F>
-        inline LuaModule& _registerModuleFunction(const char* name, lua_CFunction caller, F f) {
-#if LUAAA_USE_NEW_MODULE_REGISTRY
-            lua_getglobal(m_state, m_moduleName);
-            if (lua_isnil(m_state, -1))
+        // module[name] = the value on top of the stack (popped).
+        LuaModule& _set(const char* name)
+        {
+            lua_State* L = m_state;
+            const int v = lua_gettop(L);
+            luaaa_detail::push_named_table(L, m_moduleName);    // [v, module]
+            lua_pushstring(L, name);
+            lua_pushvalue(L, v);
+            lua_rawset(L, v + 1);
+            if (strcmp(name, "__index") == 0 || strcmp(name, "__newindex") == 0)
             {
-                lua_pop(m_state, 1);
-                lua_newtable(m_state);
+                _pushMeta(v + 1);       // a user handler is called by our dispatcher
             }
-            _ensureMetaTable(m_state);
-
-            F* funPtr = (F*)lua_newuserdata(m_state, sizeof(F));
-#   if LUAAA_WITHOUT_CPP_STDLIB
-            luaL_argcheck(m_state, funPtr != nullptr, 1, "failed to allocate memory to store function of module");
-#   else
-            luaL_argcheck(m_state, funPtr != nullptr, 1, (std::string("failed to allocate memory to store function `") + name + "`").c_str());
-#   endif
-            if (!funPtr)
-            {
-                lua_pop(m_state, 2);
-                return (*this);
-            }
-
-            new (funPtr) F(f);
-            AttachHolderFinalizer<F>(m_state);   // run ~F() when the holder is collected
-
-            lua_pushvalue(m_state, -1);
-            lua_pushcclosure(m_state, caller, 1);
-            lua_pushstring(m_state, name);
-            lua_insert(m_state, -2);
-            lua_rawset(m_state, -4);
-            lua_pop(m_state, 1);
-            lua_setglobal(m_state, m_moduleName);
-#else
-            luaL_Reg regtab[] = { { name, caller },{ nullptr, nullptr } };
-            F* funPtr = (F*)lua_newuserdata(m_state, sizeof(F));
-#   if LUAAA_WITHOUT_CPP_STDLIB
-            luaL_argcheck(m_state, funPtr != nullptr, 1, "failed to allocate memory to store function of module");
-#   else
-            luaL_argcheck(m_state, funPtr != nullptr, 1, (std::string("failed to allocate memory to store function `") + name + "`").c_str());
-#   endif
-            if (funPtr)
-            {
-                new (funPtr) F(f);
-                AttachHolderFinalizer<F>(m_state);   // run ~F() when the holder is collected
-                luaL_openlib(m_state, m_moduleName, regtab, 1);
-                // luaL_openlib leaves the module table on the stack (5.1/LuaJIT).
-                _ensureMetaTable(m_state);   // module properties need our __index/__newindex
-                lua_pop(m_state, 1);         // ...and the residue must not pile up.
-            }
-#endif
+            lua_settop(L, v - 1);
             return (*this);
         }
 
-        template<typename F>
-        inline LuaModule& _funImpl(const char * name, F f)
+        // Register the closure on top of the stack (popped) as the getter
+        // (slot 1) or setter (slot 2) of property `name`.
+        LuaModule& _property(int slot, const char* name)
         {
-            return _registerModuleFunction(name, NonMemberFunctionCaller(f), f);
+            lua_State* L = m_state;
+            const int v = lua_gettop(L);
+            luaaa_detail::push_named_table(L, m_moduleName);    // [v, module]
+            if (_pushMeta(v + 1))                               // [v, module, mt]
+            {
+                lua_rawgeti(L, v + 2, slot);                    // [v, module, mt, props]
+                lua_pushstring(L, name);
+                lua_pushvalue(L, v);
+                lua_rawset(L, -3);
+            }
+            lua_settop(L, v - 1);
+            return (*this);
         }
 
     public:
-        template<typename FRET, typename ...FARGS>
-        inline LuaModule& fun(const char * name, FRET(*f)(FARGS...))
-        {
-            return _funImpl(name, f);
-        }
-
-        template<typename ...FARGS>
-        inline LuaModule& fun(const char * name, void(*f)(FARGS...))
-        {
-            return _funImpl(name, f);
-        }
-
-#if !LUAAA_WITHOUT_CPP_STDLIB
-        template<typename TRET, typename ...ARGS>
-        inline LuaModule& fun(const char * name, const std::function<TRET(ARGS...)>& f)
-        {
-            return _funImpl<std::function<TRET(ARGS...)>>(name, f);
-        }
-
-        template<typename ...ARGS>
-        inline LuaModule& fun(const char * name, const std::function<void(ARGS...)>& f)
-        {
-            return _funImpl<std::function<void(ARGS...)>>(name, f);
-        }
-
+        // `f`: a free function, a std::function, a lambda, or a raw lua_CFunction.
         template<typename F>
         inline LuaModule& fun(const char * name, F f)
         {
-            return fun(name, to_function(f));
+            luaaa_detail::push_function(m_state, f);
+            return _set(name);
         }
-#endif
 
-        inline LuaModule& fun(const char * name, lua_CFunction f)
+        // Like fun, but ADDS `f` to the functions already registered under
+        // `name` with overload(); the call picks the first one the arguments fit.
+        template<typename F>
+        inline LuaModule& overload(const char * name, F f)
         {
-            
-#if LUAAA_USE_NEW_MODULE_REGISTRY
-            lua_getglobal(m_state, m_moduleName);
-            if (lua_isnil(m_state, -1))
-            {
-                lua_pop(m_state, 1);
-                lua_newtable(m_state);
-            }
-            _ensureMetaTable(m_state);
-            lua_pushcclosure(m_state, f, 0);
-            lua_pushstring(m_state, name);
-            lua_insert(m_state, -2);
-            lua_rawset(m_state, -3);
-            lua_setglobal(m_state, m_moduleName);
-#else
-            luaL_Reg regtab[] = { { name, f },{ nullptr, nullptr } };
-            luaL_openlib(m_state, m_moduleName, regtab, 0);
-            _ensureMetaTable(m_state);   // luaL_openlib leaves the module table on the stack
+            luaaa_detail::push_named_table(m_state, m_moduleName);
+            luaaa_detail::push_function(m_state, f);
+            luaaa_detail::add_overload(m_state, name, luaaa_detail::matcher_of(f), 0);
             lua_pop(m_state, 1);
-#endif
             return (*this);
         }
 
         template <typename V>
         inline LuaModule& def(const char * name, const V& val)
         {
-#if LUAAA_USE_NEW_MODULE_REGISTRY
-            lua_getglobal(m_state, m_moduleName);
-            if (lua_isnil(m_state, -1))
-            {
-                lua_pop(m_state, 1);
-                lua_newtable(m_state);
-            }
-            _ensureMetaTable(m_state);
             LuaStack<V>::put(m_state, val);
-            lua_pushstring(m_state, name);
-            lua_insert(m_state, -2);
-            lua_rawset(m_state, -3);
-            lua_setglobal(m_state, m_moduleName);
-#else
-            luaL_Reg regtab = { nullptr, nullptr };
-            luaL_openlib(m_state, m_moduleName, &regtab, 0);
-            LuaStack<V>::put(m_state, val);
-            lua_pushstring(m_state, name);
-            lua_insert(m_state, -2);
-            lua_rawset(m_state, -3);
-            _ensureMetaTable(m_state);   // luaL_openlib leaves the module table on the stack
-            lua_pop(m_state, 1);
-#endif
-            return (*this);
+            return _set(name);
         }
 
+        // An object of a bound class as a module field. With `obj` == nullptr a
+        // default-constructed one that lua owns; otherwise `obj` itself, which
+        // lua releases with `deleter` (never, when that is nullptr too).
         template <typename TCLASS>
         inline LuaModule& def(const char* name, const luaaa::LuaClass<TCLASS>&, const TCLASS* obj = nullptr, void(*deleter)(TCLASS*) = nullptr)
         {
-#if LUAAA_WITHOUT_CPP_STDLIB
-            luaL_argcheck(m_state, LuaClass<TCLASS>::klassName(m_state) != nullptr, 1, "cpp class not export in this state");
-#else
-            luaL_argcheck(m_state, LuaClass<TCLASS>::klassName(m_state) != nullptr, 1, (std::string("cpp class `") + LUAAA_RTTI_CLASS_NAME(TCLASS) + "` not export in this state").c_str());
-#endif
-            typename LuaClass<TCLASS>::UserDataDetail userData{};
-            if (obj)
+            struct HelperClass
             {
-                userData.obj = const_cast<TCLASS*>(obj);
+                static void f_free(luaaa_detail::UserData* uData) {
+                    if (uData->obj && uData->free_func)
+                    {
+                        (reinterpret_cast<void(*)(TCLASS*)>(uData->free_func))(static_cast<TCLASS*>(uData->obj));
+                    }
+                }
+                static void f_delete(luaaa_detail::UserData* uData) {
+                    delete static_cast<TCLASS*>(uData->obj);
+                }
+            };
+            if (!LuaClass<TCLASS>::isBound(m_state))
+            {
+                luaL_argerror(m_state, 1, lua_pushfstring(m_state, "cpp class `%s` not export in this state", LUAAA_RTTI_CLASS_NAME(TCLASS)));
+            }
+            TCLASS* target = const_cast<TCLASS*>(obj);
+            void (*dtor)(luaaa_detail::UserData*) = nullptr;
+            void (*free_func)() = nullptr;
+            if (target)
+            {
                 if (deleter)
                 {
-                    struct HelperClass
-                    {
-                        static int f_dtor(typename LuaClass<TCLASS>::UserDataDetail* uData) {
-                            typedef decltype(deleter) DELETERFTYPE;
-                            if (uData && uData->obj && uData->free_func)
-                            {
-                                (reinterpret_cast<DELETERFTYPE>(uData->free_func))(uData->obj);
-                                uData->obj = nullptr;
-                            }
-                            return 0;
-                        }
-                    };
-
-                    userData.dtor = HelperClass::f_dtor;
-                    userData.free_func = reinterpret_cast<void(*)()>(deleter);
-                }
-                else
-                {
-                    userData.dtor = nullptr;
-                    userData.free_func = nullptr;
+                    dtor = &HelperClass::f_free;
+                    free_func = reinterpret_cast<void(*)()>(deleter);   // stored BY VALUE in the object
                 }
             }
             else
             {
-                struct HelperClass
-                {
-                    static int f_dtor(typename LuaClass<TCLASS>::UserDataDetail* uData)
-                    {
-                        if (uData && uData->obj)
-                        {
-                            delete uData->obj;
-                            uData->obj = nullptr;
-                        }
-                        return 0;
-                    }
-                };
-                userData.obj = DefaultConstructor<TCLASS>::New();
-                if (!userData.obj)
+                target = DefaultConstructor<TCLASS>::New();
+                if (!target)
                 {
                     // New() only returns nullptr when TCLASS has no default
-                    // constructor. Registering a null object would defer the
-                    // failure to every single access ("invalid user data") --
-                    // fail loudly at registration time instead.
-#if LUAAA_WITHOUT_CPP_STDLIB
-                    luaL_error(m_state, "luaaa: def singleton requires a default-constructible class or an explicit object");
-#else
+                    // constructor: fail loudly at registration time.
                     luaL_error(m_state, "luaaa: cpp class `%s` is not default constructible; pass an explicit object to def()", LUAAA_RTTI_CLASS_NAME(TCLASS));
-#endif
                 }
-                userData.dtor = HelperClass::f_dtor;
-                userData.free_func = nullptr;
+                dtor = &HelperClass::f_delete;
             }
-
-#if LUAAA_USE_NEW_MODULE_REGISTRY
-            lua_getglobal(m_state, m_moduleName);
-            if (lua_isnil(m_state, -1))
-            {
-                lua_pop(m_state, 1);
-                lua_newtable(m_state);
-            }
-            _ensureMetaTable(m_state);
-            auto uData = (typename LuaClass<TCLASS>::UserDataDetail*)lua_newuserdata(m_state, sizeof(typename LuaClass<TCLASS>::UserDataDetail));
-#if LUAAA_WITHOUT_CPP_STDLIB
-            luaL_argcheck(m_state, uData != nullptr, 1, "failed to allocate memory to store object");
-#else
-            luaL_argcheck(m_state, uData != nullptr, 1, (std::string("failed to allocate memory to store object `") + name + "`").c_str());
-#endif
-            if (uData)
-            {
-                uData->obj = userData.obj;
-                uData->dtor = userData.dtor;
-                uData->free_func = userData.free_func;
-                luaL_setmetatable(m_state, (LuaClass<TCLASS>::klassName(m_state)));
-                lua_pushstring(m_state, name);
-                lua_insert(m_state, -2);
-                lua_rawset(m_state, -3);
-                lua_setglobal(m_state, m_moduleName);
-            }
-            else
-            {
-                lua_pop(m_state, 2);
-            }
-#else
-            luaL_Reg regtab = { nullptr, nullptr };
-            luaL_openlib(m_state, m_moduleName, &regtab, 0);
-            auto uData = (typename LuaClass<TCLASS>::UserDataDetail*)lua_newuserdata(m_state, sizeof(typename LuaClass<TCLASS>::UserDataDetail));
-            if (uData)
-            {
-                uData->obj = userData.obj;
-                uData->dtor = userData.dtor;
-                uData->free_func = userData.free_func;
-                luaL_setmetatable(m_state, (LuaClass<TCLASS>::klassName(m_state)));
-                lua_pushstring(m_state, name);
-                lua_insert(m_state, -2);
-                lua_rawset(m_state, -3);
-            }
-            else
-            {
-                lua_pop(m_state, 1);
-            }
-            _ensureMetaTable(m_state);   // luaL_openlib leaves the module table on the stack
-            lua_pop(m_state, 1);
-#endif
-            return (*this);
+            luaaa_detail::UserData* uData = luaaa_detail::new_userdata(m_state, 0);
+            uData->obj = target;
+            uData->dtor = dtor;
+            uData->free_func = free_func;
+            LuaClass<TCLASS>::pushMetatable(m_state);
+            lua_setmetatable(m_state, -2);
+            return _set(name);
         }
 
         template <typename V>
         inline LuaModule& def(const char * name, const V val[], size_t length)
         {
-#if LUAAA_USE_NEW_MODULE_REGISTRY
-            lua_getglobal(m_state, m_moduleName);
-            if (lua_isnil(m_state, -1))
-            {
-                lua_pop(m_state, 1);
-                lua_newtable(m_state);
-            }
-            _ensureMetaTable(m_state);
             lua_newtable(m_state);
             for (size_t idx = 0; idx < length; ++idx)
             {
                 LuaStack<V>::put(m_state, val[idx]);
-                lua_rawseti(m_state, -2, idx + 1);
+                lua_rawseti(m_state, -2, (int)(idx + 1));
             }
-            lua_pushstring(m_state, name);
-            lua_insert(m_state, -2);
-            lua_rawset(m_state, -3);
-            lua_setglobal(m_state, m_moduleName);
-#else
-            luaL_Reg regtab = { nullptr, nullptr };
-            luaL_openlib(m_state, m_moduleName, &regtab, 0);
-            lua_newtable(m_state);
-            for (size_t idx = 0; idx < length; ++idx)
-            {
-                LuaStack<V>::put(m_state, val[idx]);
-                lua_rawseti(m_state, -2, idx + 1);
-            }
-            lua_pushstring(m_state, name);
-            lua_insert(m_state, -2);
-            lua_rawset(m_state, -3);
-            _ensureMetaTable(m_state);   // luaL_openlib leaves the module table on the stack
-            lua_pop(m_state, 1);
-#endif
-            return (*this);
+            return _set(name);
         }
 
         // disable the cast from "const char [#]" to "char (*)[#]"
         inline LuaModule& def(const char * name, const char * str)
         {
-#if LUAAA_USE_NEW_MODULE_REGISTRY
-            lua_getglobal(m_state, m_moduleName);
-            if (lua_isnil(m_state, -1))
-            {
-                lua_pop(m_state, 1);
-                lua_newtable(m_state);
-            }
-            _ensureMetaTable(m_state);
-            LuaStack<decltype(str)>::put(m_state, str);
-            lua_pushstring(m_state, name);
-            lua_insert(m_state, -2);
-            lua_rawset(m_state, -3);
-            lua_setglobal(m_state, m_moduleName);
-#else
-            luaL_Reg regtab = { nullptr, nullptr };
-            luaL_openlib(m_state, m_moduleName, &regtab, 0);
-            LuaStack<decltype(str)>::put(m_state, str);
-            lua_pushstring(m_state, name);
-            lua_insert(m_state, -2);
-            lua_rawset(m_state, -3);
-            _ensureMetaTable(m_state);   // luaL_openlib leaves the module table on the stack
-            lua_pop(m_state, 1);
-#endif
-            return (*this);
+            lua_pushstring(m_state, str);
+            return _set(name);
         }
 
 #if !LUAAA_WITHOUT_CPP_STDLIB
@@ -4009,6 +4123,12 @@ namespace LUAAA_NS
         inline LuaModule& fun(const std::string& name, F f)
         {
             return fun(name.c_str(), f);
+        }
+
+        template<typename F>
+        inline LuaModule& overload(const std::string& name, F f)
+        {
+            return overload(name.c_str(), f);
         }
 
         template <typename V>
@@ -4019,27 +4139,54 @@ namespace LUAAA_NS
 #endif
 
     private:
-        template <typename F>
-        inline LuaModule& _getterImpl(const char* name, lua_CFunction invoker, F f)
+        template<typename F, typename P>
+        struct PropGet
         {
-#if LUAAA_FEATURE_PROPERTY
-            char internal_name[256];
-            MakeInternalPropName(m_state, internal_name, sizeof(internal_name), '<', name);
-            return _registerModuleFunction(internal_name, invoker, f);
-#else
-            return *this;
-#endif
-        }
+            static int Invoke(lua_State* state)
+            {
+                void* calleePtr = lua_touserdata(state, lua_upvalueindex(1));
+                if (!calleePtr)
+                {
+                    lua_pushnil(state);
+                    return 1;
+                }
+                LUAAA_TRY
+                {
+                    LuaStackReturn<P>(state, (*(F*)(calleePtr))());
+                }
+                LUAAA_CATCH(state, "property getter")
+                return 1;
+            }
+        };
 
-        template<typename F>
-        inline LuaModule& _setterImpl(const char* name, lua_CFunction invoker, F f)
+        template<typename F, typename P>
+        struct PropSet
+        {
+            static int Invoke(lua_State* state)
+            {
+                void* calleePtr = lua_touserdata(state, lua_upvalueindex(1));
+                if (calleePtr)
+                {
+                    LUAAA_TRY
+                    {
+                        (*(F*)(calleePtr))(LuaStack<P>::get(state, 3));
+                    }
+                    LUAAA_CATCH(state, "property setter")
+                }
+                return 0;
+            }
+        };
+
+        template <typename F>
+        inline LuaModule& _accessor(int slot, const char* name, lua_CFunction invoker, const F& f)
         {
 #if LUAAA_FEATURE_PROPERTY
-            char internal_name[256];
-            MakeInternalPropName(m_state, internal_name, sizeof(internal_name), '>', name);
-            return _registerModuleFunction(internal_name, invoker, f);
+            luaaa_detail::push_holder(m_state, f);
+            lua_pushcclosure(m_state, invoker, 1);
+            return _property(slot, name);
 #else
-            return *this;
+            (void)slot; (void)name; (void)invoker; (void)f;
+            return (*this);
 #endif
         }
 
@@ -4048,85 +4195,23 @@ namespace LUAAA_NS
         inline LuaModule& get(const char* name, P(*f)())
         {
             static_assert(!std::is_void<P>::value, "Error: getter function must return a value.");
-            struct HelperClass {
-                static inline int Invoke(lua_State* state) {
-                    typedef decltype(f) FTYPE;
-                    void* calleePtr = lua_touserdata(state, lua_upvalueindex(1));
-                    if (calleePtr)
-                    {
-                        LUAAA_TRY
-                        {
-                            LuaStackReturn<P>(state, (*(FTYPE*)(calleePtr))());
-                        }
-                        LUAAA_CATCH(state, "property getter")
-                    }
-                    else
-                    {
-                        lua_pushnil(state);
-                    }
-                    return 1;
-                }
-            };
-            return _getterImpl(name, HelperClass::Invoke, f);
+            return _accessor(1, name, &PropGet<P(*)(), P>::Invoke, f);
         }
 
         template<typename P, typename TRET>
         inline LuaModule& set(const char* name, TRET(*f)(P))
         {
-            struct HelperClass {
-                static inline int Invoke(lua_State* state) {
-                    typedef decltype(f) FTYPE;
-                    void* calleePtr = lua_touserdata(state, lua_upvalueindex(1));
-                    if (calleePtr)
-                    {
-                        LUAAA_TRY
-                        {
-                            (*(FTYPE*)(calleePtr))(LuaStack<P>::get(state, 3));
-                        }
-                        LUAAA_CATCH(state, "property setter")
-                    }
-                    return 0;
-                }
-            };
-            return _setterImpl(name, HelperClass::Invoke, f);
+            return _accessor(2, name, &PropSet<TRET(*)(P), P>::Invoke, f);
         }
 
-    public:
 #if !LUAAA_WITHOUT_CPP_STDLIB
         // access prop from lambdas
         template<typename P>
         inline LuaModule& get(const char* name, std::function<P()> f)
         {
             static_assert(!std::is_void<P>::value, "Error: getter function must return a value.");
-            struct HelperClass {
-                static inline int Invoke(lua_State* state) {
-                    typedef decltype(f) FTYPE;
-                    void* calleePtr = lua_touserdata(state, lua_upvalueindex(1));
-                    if (calleePtr)
-                    {
-                        LUAAA_TRY
-                        {
-                            LuaStackReturn<P>(state, (*(FTYPE*)(calleePtr))());
-                        }
-                        LUAAA_CATCH(state, "property getter")
-                    }
-                    else
-                    {
-                        lua_pushnil(state);
-                    }
-                    return 1;
-                }
-            };
-            return _getterImpl(name, HelperClass::Invoke, f);
+            return _accessor(1, name, &PropGet<std::function<P()>, P>::Invoke, f);
         }
-
-        // template<typename F>
-        // inline LuaModule& get(const char* name, std::function<F> f)
-        // {
-        //     //static_assert(false, "Error: invalid signature of getter function");
-        //     assert(!"Error: invalid signature of getter function");
-        //     return (*this);
-        // }
 
         template<typename F>
         inline LuaModule& get(const char* name, F f)
@@ -4137,31 +4222,8 @@ namespace LUAAA_NS
         template<typename P, typename TRET>
         inline LuaModule& set(const char* name, std::function<TRET(P)> f)
         {
-            struct HelperClass {
-                static inline int Invoke(lua_State* state) {
-                    typedef decltype(f) FTYPE;
-                    void* calleePtr = lua_touserdata(state, lua_upvalueindex(1));
-                    if (calleePtr)
-                    {
-                        LUAAA_TRY
-                        {
-                            (*(FTYPE*)(calleePtr))(LuaStack<P>::get(state, 3));
-                        }
-                        LUAAA_CATCH(state, "property setter")
-                    }
-                    return 0;
-                }
-            };
-            return _setterImpl(name, HelperClass::Invoke, f);
+            return _accessor(2, name, &PropSet<std::function<TRET(P)>, P>::Invoke, f);
         }
-
-        // template<typename F>
-        // inline LuaModule& set(const char* name, std::function<F> f)
-        // {
-        //     //static_assert(std::false_type::value, "Error: invalid signature of setter function");
-        //     //assert(!"Error: invalid signature of setter function");
-        //     return (*this);
-        // }
 
         template<typename F>
         inline LuaModule& set(const char* name, F f)
@@ -4210,6 +4272,7 @@ namespace LUAAA_NS
     template<typename K, size_t N>
     struct LuaStack<std::array<K, N>>
     {
+        enum { LUAAA_TABLE_STACK = 1 };
         typedef std::array<K, N> Container;
         inline static Container get(lua_State * L, int idx)
         {
@@ -4251,470 +4314,301 @@ namespace LUAAA_NS
     // order is unspecified (a table built as {[1]=..,[2]=..} or filled back to
     // front may live in the hash part and come out shuffled), and it would also
     // sweep the values of non-array keys ({'a','b', x='c'}) into the container.
+    //
+    // Every container converter is one of two templates -- SequenceStack or
+    // MapStack -- parameterized by how an element is added.
+    namespace luaaa_detail {
+        template<typename C>
+        struct AddBack          // deque, list
+        {
+            C& c;
+            AddBack(C& container, lua_State*, int) : c(container) {}
+            template<typename V> void operator()(V&& v) { c.push_back(std::forward<V>(v)); }
+        };
 
-    // vector
+        template<typename C>
+        struct AddBackReserved  // vector: the table length is a capacity hint only
+        {
+            C& c;
+            AddBackReserved(C& container, lua_State* L, int idx) : c(container) { c.reserve(LUAAA_rawlen(L, idx)); }
+            template<typename V> void operator()(V&& v) { c.push_back(std::forward<V>(v)); }
+        };
+
+        template<typename C>
+        struct AddInsert        // the set family
+        {
+            C& c;
+            AddInsert(C& container, lua_State*, int) : c(container) {}
+            template<typename V> void operator()(V&& v) { c.insert(std::forward<V>(v)); }
+        };
+
+        template<typename C>
+        struct AddAfter         // forward_list has no push_back; push_front would reverse the order
+        {
+            C& c;
+            typename C::iterator it;
+            AddAfter(C& container, lua_State*, int) : c(container), it(container.before_begin()) {}
+            template<typename V> void operator()(V&& v) { it = c.insert_after(it, std::forward<V>(v)); }
+        };
+
+        template<typename C, typename ADD>
+        struct SequenceStack
+        {
+            enum { LUAAA_TABLE_STACK = 1 };     // "travels as a lua table" (see match_arg)
+
+            inline static C get(lua_State * L, int idx)
+            {
+                C result;
+                if (!lua_istable(L, idx)) { conv_arg_error(L, idx, "required table not found on stack."); }
+                idx = AbsIndex(L, idx);
+                ADD add(result, L, idx);
+                for (int i = 1; ; ++i)              // t[1], t[2], ... up to the first nil
+                {
+                    lua_rawgeti(L, idx, i);
+                    if (lua_isnil(L, -1))
+                    {
+                        lua_pop(L, 1);
+                        break;
+                    }
+                    add(LuaStack<typename C::value_type>::get(L, lua_gettop(L)));
+                    lua_pop(L, 1);
+                }
+                return result;
+            }
+
+            inline static void put(lua_State * L, const C& s)
+            {
+                lua_newtable(L);
+                int index = 1;
+                for (auto it = s.begin(); it != s.end(); ++it)
+                {
+                    LuaStack<typename C::value_type>::put(L, *it);
+                    lua_rawseti(L, -2, index++);
+                }
+            }
+        };
+
+        struct MapAssign        // map, unordered_map
+        {
+            template<typename C, typename K, typename V>
+            static void add(C& c, K&& k, V&& v) { c[std::forward<K>(k)] = std::forward<V>(v); }
+        };
+
+        struct MapEmplace       // the multimaps have no operator[]
+        {
+            template<typename C, typename K, typename V>
+            static void add(C& c, K&& k, V&& v) { c.emplace(std::forward<K>(k), std::forward<V>(v)); }
+        };
+
+        template<typename C, typename ADD>
+        struct MapStack
+        {
+            enum { LUAAA_TABLE_STACK = 1 };
+
+            inline static C get(lua_State * L, int idx)
+            {
+                C result;
+                if (!lua_istable(L, idx)) { conv_arg_error(L, idx, "required table not found on stack."); }
+                idx = AbsIndex(L, idx);
+                lua_pushnil(L);
+                while (0 != lua_next(L, idx))
+                {
+                    const int top = lua_gettop(L);
+                    // Copy the key before converting it: converting a NUMBER key
+                    // to a string rewrites it in place and would "confuse the
+                    // next call to lua_next" (Lua manual).
+                    lua_pushvalue(L, top - 1);
+                    typename C::key_type key = LuaStack<typename C::key_type>::get(L, top + 1);
+                    lua_pop(L, 1);
+                    ADD::add(result, std::move(key), LuaStack<typename C::mapped_type>::get(L, top));
+                    lua_pop(L, 1);
+                }
+                return result;
+            }
+
+            inline static void put(lua_State * L, const C& s)
+            {
+                lua_newtable(L);
+                for (auto it = s.begin(); it != s.end(); ++it)
+                {
+                    LuaStack<typename C::key_type>::put(L, it->first);
+                    LuaStack<typename C::mapped_type>::put(L, it->second);
+                    lua_rawset(L, -3);
+                }
+            }
+        };
+    }
+
     template<typename K, typename ...ARGS>
     struct LuaStack<std::vector<K, ARGS...>>
-    {
-        typedef std::vector<K, ARGS...> Container;
-        inline static Container get(lua_State * L, int idx)
-        {
-            Container result;
-            if (!(lua_istable(L, idx))) { luaaa_detail::conv_arg_error(L, idx, "required table not found on stack."); }
-            if (lua_istable(L, idx))
-            {
-                result.reserve(LUAAA_rawlen(L, idx));   // a hint only: the loop below decides the length
-                // read t[1], t[2], ... up to the first nil
-                for (int i = 1; ; ++i)
-                {
-                    lua_rawgeti(L, idx, i);
-                    if (lua_isnil(L, -1))
-                    {
-                        lua_pop(L, 1);
-                        break;
-                    }
-                    result.push_back(LuaStack<typename Container::value_type>::get(L, lua_gettop(L)));
-                    lua_pop(L, 1);
-                }
-            }
-            return result;
-        }
-        inline static void put(lua_State * L, const Container& s)
-        {
-            lua_newtable(L);
-            int index = 1;
-            for (auto it = s.begin(); it != s.end(); ++it)
-            {
-                LuaStack<typename Container::value_type>::put(L, *it);
-                lua_rawseti(L, -2, index++);
-            }
-        }
-    };
+        : luaaa_detail::SequenceStack<std::vector<K, ARGS...>, luaaa_detail::AddBackReserved<std::vector<K, ARGS...>>> {};
 
-    // deque
     template<typename K, typename ...ARGS>
     struct LuaStack<std::deque<K, ARGS...>>
-    {
-        typedef std::deque<K, ARGS...> Container;
-        inline static Container get(lua_State * L, int idx)
-        {
-            Container result;
-            if (!(lua_istable(L, idx))) { luaaa_detail::conv_arg_error(L, idx, "required table not found on stack."); }
-            if (lua_istable(L, idx))
-            {
-                // read t[1], t[2], ... up to the first nil (see std::vector)
-                for (int i = 1; ; ++i)
-                {
-                    lua_rawgeti(L, idx, i);
-                    if (lua_isnil(L, -1))
-                    {
-                        lua_pop(L, 1);
-                        break;
-                    }
-                    result.push_back(LuaStack<typename Container::value_type>::get(L, lua_gettop(L)));
-                    lua_pop(L, 1);
-                }
-            }
-            return result;
-        }
-        inline static void put(lua_State * L, const Container& s)
-        {
-            lua_newtable(L);
-            int index = 1;
-            for (auto it = s.begin(); it != s.end(); ++it)
-            {
-                LuaStack<typename Container::value_type>::put(L, *it);
-                lua_rawseti(L, -2, index++);
-            }
-        }
-    };
+        : luaaa_detail::SequenceStack<std::deque<K, ARGS...>, luaaa_detail::AddBack<std::deque<K, ARGS...>>> {};
 
-    // list
     template<typename K, typename ...ARGS>
     struct LuaStack<std::list<K, ARGS...>>
-    {
-        typedef std::list<K, ARGS...> Container;
-        inline static Container get(lua_State * L, int idx)
-        {
-            Container result;
-            if (!(lua_istable(L, idx))) { luaaa_detail::conv_arg_error(L, idx, "required table not found on stack."); }
-            if (lua_istable(L, idx))
-            {
-                // read t[1], t[2], ... up to the first nil (see std::vector)
-                for (int i = 1; ; ++i)
-                {
-                    lua_rawgeti(L, idx, i);
-                    if (lua_isnil(L, -1))
-                    {
-                        lua_pop(L, 1);
-                        break;
-                    }
-                    result.push_back(LuaStack<typename Container::value_type>::get(L, lua_gettop(L)));
-                    lua_pop(L, 1);
-                }
-            }
-            return result;
-        }
-        inline static void put(lua_State * L, const Container& s)
-        {
-            lua_newtable(L);
-            int index = 1;
-            for (auto it = s.begin(); it != s.end(); ++it)
-            {
-                LuaStack<typename Container::value_type>::put(L, *it);
-                lua_rawseti(L, -2, index++);
-            }
-        }
-    };
+        : luaaa_detail::SequenceStack<std::list<K, ARGS...>, luaaa_detail::AddBack<std::list<K, ARGS...>>> {};
 
-    // forward_list
     template<typename K, typename ...ARGS>
     struct LuaStack<std::forward_list<K, ARGS...>>
-    {
-        typedef std::forward_list<K, ARGS...> Container;
-        inline static Container get(lua_State * L, int idx)
-        {
-            Container result;
-            if (!(lua_istable(L, idx))) { luaaa_detail::conv_arg_error(L, idx, "required table not found on stack."); }
-            if (lua_istable(L, idx))
-            {
-                // forward_list has no push_back (it is a singly linked list).
-                // insert_after advancing from before_begin() preserves the Lua
-                // array order (1,2,3,...) -- push_front would reverse it.
-                auto it = result.before_begin();
-                // read t[1], t[2], ... up to the first nil (see std::vector)
-                for (int i = 1; ; ++i)
-                {
-                    lua_rawgeti(L, idx, i);
-                    if (lua_isnil(L, -1))
-                    {
-                        lua_pop(L, 1);
-                        break;
-                    }
-                    it = result.insert_after(it, LuaStack<typename Container::value_type>::get(L, lua_gettop(L)));
-                    lua_pop(L, 1);
-                }
-            }
-            return result;
-        }
-        inline static void put(lua_State * L, const Container& s)
-        {
-            lua_newtable(L);
-            int index = 1;
-            for (auto it = s.begin(); it != s.end(); ++it)
-            {
-                LuaStack<typename Container::value_type>::put(L, *it);
-                lua_rawseti(L, -2, index++);
-            }
-        }
-    };
+        : luaaa_detail::SequenceStack<std::forward_list<K, ARGS...>, luaaa_detail::AddAfter<std::forward_list<K, ARGS...>>> {};
 
-    // set
     template<typename K, typename ...ARGS>
     struct LuaStack<std::set<K, ARGS...>>
-    {
-        typedef std::set<K, ARGS...> Container;
-        inline static Container get(lua_State * L, int idx)
-        {
-            Container result;
-            if (!(lua_istable(L, idx))) { luaaa_detail::conv_arg_error(L, idx, "required table not found on stack."); }
-            if (lua_istable(L, idx))
-            {
-                // read t[1], t[2], ... up to the first nil (see std::vector)
-                for (int i = 1; ; ++i)
-                {
-                    lua_rawgeti(L, idx, i);
-                    if (lua_isnil(L, -1))
-                    {
-                        lua_pop(L, 1);
-                        break;
-                    }
-                    result.insert(LuaStack<typename Container::value_type>::get(L, lua_gettop(L)));
-                    lua_pop(L, 1);
-                }
-            }
-            return result;
-        }
-        inline static void put(lua_State * L, const Container& s)
-        {
-            lua_newtable(L);
-            int index = 1;
-            for (auto it = s.begin(); it != s.end(); ++it)
-            {
-                LuaStack<typename Container::value_type>::put(L, *it);
-                lua_rawseti(L, -2, index++);
-            }
-        }
-    };
+        : luaaa_detail::SequenceStack<std::set<K, ARGS...>, luaaa_detail::AddInsert<std::set<K, ARGS...>>> {};
 
-    // multiset
     template<typename K, typename ...ARGS>
     struct LuaStack<std::multiset<K, ARGS...>>
-    {
-        typedef std::multiset<K, ARGS...> Container;
-        inline static Container get(lua_State * L, int idx)
-        {
-            Container result;
-            if (!(lua_istable(L, idx))) { luaaa_detail::conv_arg_error(L, idx, "required table not found on stack."); }
-            if (lua_istable(L, idx))
-            {
-                // read t[1], t[2], ... up to the first nil (see std::vector)
-                for (int i = 1; ; ++i)
-                {
-                    lua_rawgeti(L, idx, i);
-                    if (lua_isnil(L, -1))
-                    {
-                        lua_pop(L, 1);
-                        break;
-                    }
-                    result.insert(LuaStack<typename Container::value_type>::get(L, lua_gettop(L)));
-                    lua_pop(L, 1);
-                }
-            }
-            return result;
-        }
-        inline static void put(lua_State * L, const Container& s)
-        {
-            lua_newtable(L);
-            int index = 1;
-            for (auto it = s.begin(); it != s.end(); ++it)
-            {
-                LuaStack<typename Container::value_type>::put(L, *it);
-                lua_rawseti(L, -2, index++);
-            }
-        }
-    };
+        : luaaa_detail::SequenceStack<std::multiset<K, ARGS...>, luaaa_detail::AddInsert<std::multiset<K, ARGS...>>> {};
 
-    // unordered_set
     template<typename K, typename ...ARGS>
     struct LuaStack<std::unordered_set<K, ARGS...>>
-    {
-        typedef std::unordered_set<K, ARGS...> Container;
-        inline static Container get(lua_State * L, int idx)
-        {
-            Container result;
-            if (!(lua_istable(L, idx))) { luaaa_detail::conv_arg_error(L, idx, "required table not found on stack."); }
-            if (lua_istable(L, idx))
-            {
-                // read t[1], t[2], ... up to the first nil (see std::vector)
-                for (int i = 1; ; ++i)
-                {
-                    lua_rawgeti(L, idx, i);
-                    if (lua_isnil(L, -1))
-                    {
-                        lua_pop(L, 1);
-                        break;
-                    }
-                    result.insert(LuaStack<typename Container::value_type>::get(L, lua_gettop(L)));
-                    lua_pop(L, 1);
-                }
-            }
-            return result;
-        }
+        : luaaa_detail::SequenceStack<std::unordered_set<K, ARGS...>, luaaa_detail::AddInsert<std::unordered_set<K, ARGS...>>> {};
 
-        inline static void put(lua_State * L, const Container& s)
-        {
-            lua_newtable(L);
-            int index = 1;
-            for (auto it = s.begin(); it != s.end(); ++it)
-            {
-                LuaStack<typename Container::value_type>::put(L, *it);
-                lua_rawseti(L, -2, index++);
-            }
-        }
-    };
-
-    // unordered_multiset
     template<typename K, typename ...ARGS>
     struct LuaStack<std::unordered_multiset<K, ARGS...>>
-    {
-        typedef std::unordered_multiset<K, ARGS...> Container;
-        inline static Container get(lua_State * L, int idx)
-        {
-            Container result;
-            if (!(lua_istable(L, idx))) { luaaa_detail::conv_arg_error(L, idx, "required table not found on stack."); }
-            if (lua_istable(L, idx))
-            {
-                // read t[1], t[2], ... up to the first nil (see std::vector)
-                for (int i = 1; ; ++i)
-                {
-                    lua_rawgeti(L, idx, i);
-                    if (lua_isnil(L, -1))
-                    {
-                        lua_pop(L, 1);
-                        break;
-                    }
-                    result.insert(LuaStack<typename Container::value_type>::get(L, lua_gettop(L)));
-                    lua_pop(L, 1);
-                }
-            }
-            return result;
-        }
+        : luaaa_detail::SequenceStack<std::unordered_multiset<K, ARGS...>, luaaa_detail::AddInsert<std::unordered_multiset<K, ARGS...>>> {};
 
-        inline static void put(lua_State * L, const Container& s)
-        {
-            lua_newtable(L);
-            int index = 1;
-            for (auto it = s.begin(); it != s.end(); ++it)
-            {
-                LuaStack<typename Container::value_type>::put(L, *it);
-                lua_rawseti(L, -2, index++);
-            }
-        }
-    };
-
-    // map
     template<typename K, typename V, typename ...ARGS>
     struct LuaStack<std::map<K, V, ARGS...>>
-    {
-        typedef std::map<K, V, ARGS...> Container;
-        inline static Container get(lua_State * L, int idx)
-        {
-            Container result;
-            if (!(lua_istable(L, idx))) { luaaa_detail::conv_arg_error(L, idx, "required table not found on stack."); }
-            if (lua_istable(L, idx))
-            {
-                lua_pushnil(L);
-                while (0 != lua_next(L, idx))
-                {
-                    const int top = lua_gettop(L);
-                    // Copy the key before converting it: LuaStack<std::string>::get
-                    // calls lua_tostring, which may replace a NUMBER key in place and
-                    // "confuse the next call to lua_next" (Lua manual). Convert the copy
-                    // so the original key on the stack is left untouched.
-                    lua_pushvalue(L, top - 1);
-                    typename Container::key_type key = LuaStack<typename Container::key_type>::get(L, top + 1);
-                    lua_pop(L, 1);
-                    result[key] = LuaStack<typename Container::mapped_type>::get(L, top);
-                    lua_pop(L, 1);
-                }
-            }
-            return result;
-        }
-        inline static void put(lua_State * L, const Container& s)
-        {
-            lua_newtable(L);
-            for (auto it = s.begin(); it != s.end(); ++it)
-            {
-                LuaStack<typename Container::key_type>::put(L, it->first);
-                LuaStack<typename Container::mapped_type>::put(L, it->second);
-                lua_rawset(L, -3);
-            }
-        }
-    };
+        : luaaa_detail::MapStack<std::map<K, V, ARGS...>, luaaa_detail::MapAssign> {};
 
-    // multimap
     template<typename K, typename V, typename ...ARGS>
     struct LuaStack<std::multimap<K, V, ARGS...>>
-    {
-        typedef std::multimap<K, V, ARGS...> Container;
-        inline static Container get(lua_State * L, int idx)
-        {
-            Container result;
-            if (!(lua_istable(L, idx))) { luaaa_detail::conv_arg_error(L, idx, "required table not found on stack."); }
-            if (lua_istable(L, idx))
-            {
-                lua_pushnil(L);
-                while (0 != lua_next(L, idx))
-                {
-                    const int top = lua_gettop(L);
-                    // std::multimap has no operator[]; use emplace. Copy the key first
-                    // (see std::map above) so stringifying a NUMBER key can't confuse
-                    // the next lua_next.
-                    lua_pushvalue(L, top - 1);
-                    typename Container::key_type key = LuaStack<typename Container::key_type>::get(L, top + 1);
-                    lua_pop(L, 1);
-                    result.emplace(key, LuaStack<typename Container::mapped_type>::get(L, top));
-                    lua_pop(L, 1);
-                }
-            }
-            return result;
-        }
-        inline static void put(lua_State * L, const Container& s)
-        {
-            lua_newtable(L);
-            for (auto it = s.begin(); it != s.end(); ++it)
-            {
-                LuaStack<typename Container::key_type>::put(L, it->first);
-                LuaStack<typename Container::mapped_type>::put(L, it->second);
-                lua_rawset(L, -3);
-            }
-        }
-    };
+        : luaaa_detail::MapStack<std::multimap<K, V, ARGS...>, luaaa_detail::MapEmplace> {};
 
-    // unordered_map
     template<typename K, typename V, typename ...ARGS>
     struct LuaStack<std::unordered_map<K, V, ARGS...>>
+        : luaaa_detail::MapStack<std::unordered_map<K, V, ARGS...>, luaaa_detail::MapAssign> {};
+
+    template<typename K, typename V, typename ...ARGS>
+    struct LuaStack<std::unordered_multimap<K, V, ARGS...>>
+        : luaaa_detail::MapStack<std::unordered_multimap<K, V, ARGS...>, luaaa_detail::MapEmplace> {};
+
+    //========================================================
+    // smart pointers
+    //========================================================
+    // std::shared_ptr<T> (T a bound class). Returned to lua, the object is
+    // SHARED: the userdata keeps a shared_ptr of its own and releases it when
+    // collected. Such an object can be passed back to a std::shared_ptr<T> (or
+    // shared_ptr<Base>) parameter, which then shares ownership with lua -- and
+    // to T& / T* parameters and as `self`, like any other object. An object
+    // that lua holds in another way (made by ctor<>(), a raw pointer, ...) is
+    // not accepted by a shared_ptr parameter: there is nothing to share.
+    // nil <-> an empty pointer, in both directions.
+    template<typename T>
+    struct LuaStack<std::shared_ptr<T>>
     {
-        typedef std::unordered_map<K, V, ARGS...> Container;
-        inline static Container get(lua_State * L, int idx)
+        typedef typename std::remove_cv<T>::type MT;
+
+        inline static std::shared_ptr<T> get(lua_State * L, int idx)
         {
-            Container result;
-            if (!(lua_istable(L, idx))) { luaaa_detail::conv_arg_error(L, idx, "required table not found on stack."); }
-            if (lua_istable(L, idx))
+            if (lua_isnoneornil(L, idx))
             {
-                lua_pushnil(L);
-                while (0 != lua_next(L, idx))
-                {
-                    const int top = lua_gettop(L);
-                    // Copy the key before converting it (see std::map above): a NUMBER
-                    // key stringified in place would confuse the next lua_next.
-                    lua_pushvalue(L, top - 1);
-                    typename Container::key_type key = LuaStack<typename Container::key_type>::get(L, top + 1);
-                    lua_pop(L, 1);
-                    result[key] = LuaStack<typename Container::mapped_type>::get(L, top);
-                    lua_pop(L, 1);
-                }
+                return std::shared_ptr<T>();
             }
-            return result;
+            int why = 0;
+            luaaa_detail::UserData* owner = nullptr;
+            void* p = luaaa_detail::to_object(L, idx, LuaClass<MT>::typeKey(), &why, &owner);
+            if (p == nullptr)
+            {
+                luaaa_detail::bad_object(L, idx, LuaClass<MT>::klassName(L), why, LUAAA_RTTI_CLASS_NAME(T));
+            }
+            if (owner->holderKind != luaaa_detail::SharedHolderTag())
+            {
+                luaaa_detail::conv_arg_error(L, (idx > 0) ? idx : 1, "std::shared_ptr expected: this object is not held by a shared_ptr");
+            }
+            // aliasing constructor: share the holder's ownership, point at the (possibly base) object
+            return std::shared_ptr<T>(*static_cast<std::shared_ptr<void>*>(owner->holder), static_cast<MT*>(p));
         }
-        inline static void put(lua_State * L, const Container& s)
+
+        inline static void put(lua_State * L, const std::shared_ptr<T>& sp)
         {
-            lua_newtable(L);
-            for (auto it = s.begin(); it != s.end(); ++it)
+            if (!sp) { lua_pushnil(L); return; }
+            if (!LuaClass<MT>::pushMetatable(L))
             {
-                LuaStack<typename Container::key_type>::put(L, it->first);
-                LuaStack<typename Container::mapped_type>::put(L, it->second);
-                lua_rawset(L, -3);
+                luaL_argerror(L, 1, lua_pushfstring(L, "cpp class `%s` not export", LUAAA_RTTI_CLASS_NAME(T)));
             }
+            typedef std::shared_ptr<void> Holder;
+            luaaa_detail::UserData* uData = luaaa_detail::new_userdata(L, (alignof(Holder) - 1) + sizeof(Holder));
+            uData->holder = new (luaaa_detail::payload(uData, alignof(Holder))) Holder(std::const_pointer_cast<MT>(sp));
+            uData->holderKind = luaaa_detail::SharedHolderTag();
+            uData->obj = const_cast<MT*>(sp.get());
+            uData->dtor = &release;
+            lua_insert(L, -2);
+            lua_setmetatable(L, -2);
+        }
+
+    private:
+        static void release(luaaa_detail::UserData* uData)
+        {
+            typedef std::shared_ptr<void> Holder;
+            static_cast<Holder*>(uData->holder)->~Holder();
         }
     };
 
-    // unordered_multimap
-    template<typename K, typename V, typename ...ARGS>
-    struct LuaStack<std::unordered_multimap<K, V, ARGS...>>
+    // std::unique_ptr<T, D> (T a bound class). Returned to lua, the object is
+    // OWNED by lua: the unique_ptr moves into the userdata and its deleter runs
+    // when the userdata is collected. Passed to a std::unique_ptr<T, D>
+    // parameter, ownership moves back to C++ and the lua object becomes
+    // invalid (using it raises "invalid user data") -- only an object that
+    // came from exactly that unique_ptr type can be taken this way.
+    // nil <-> an empty pointer, in both directions.
+    template<typename T, typename D>
+    struct LuaStack<std::unique_ptr<T, D>>
     {
-        typedef std::unordered_multimap<K, V, ARGS...> Container;
-        inline static Container get(lua_State * L, int idx)
+        typedef std::unique_ptr<T, D> Ptr;
+        typedef typename std::remove_cv<T>::type MT;
+
+        inline static Ptr get(lua_State * L, int idx)
         {
-            Container result;
-            if (!(lua_istable(L, idx))) { luaaa_detail::conv_arg_error(L, idx, "required table not found on stack."); }
-            if (lua_istable(L, idx))
+            if (lua_isnoneornil(L, idx))
             {
-                lua_pushnil(L);
-                while (0 != lua_next(L, idx))
-                {
-                    const int top = lua_gettop(L);
-                    // no operator[] on unordered_multimap; use emplace. Copy the key
-                    // first (see std::map above) to keep lua_next intact.
-                    lua_pushvalue(L, top - 1);
-                    typename Container::key_type key = LuaStack<typename Container::key_type>::get(L, top + 1);
-                    lua_pop(L, 1);
-                    result.emplace(key, LuaStack<typename Container::mapped_type>::get(L, top));
-                    lua_pop(L, 1);
-                }
+                return Ptr();
             }
-            return result;
+            int why = 0;
+            luaaa_detail::UserData* owner = nullptr;
+            void* p = luaaa_detail::to_object(L, idx, LuaClass<MT>::typeKey(), &why, &owner);
+            if (p == nullptr)
+            {
+                luaaa_detail::bad_object(L, idx, LuaClass<MT>::klassName(L), why, LUAAA_RTTI_CLASS_NAME(T));
+            }
+            if (owner->holderKind != luaaa_detail::UniqueHolderTag<Ptr>::key())
+            {
+                luaaa_detail::conv_arg_error(L, (idx > 0) ? idx : 1, "std::unique_ptr expected: this object is not owned by a matching unique_ptr");
+            }
+            Ptr* holder = static_cast<Ptr*>(owner->holder);
+            Ptr taken(std::move(*holder));
+            holder->~Ptr();
+            owner->holder = nullptr;
+            owner->holderKind = nullptr;
+            owner->dtor = nullptr;
+            owner->obj = nullptr;       // the lua object is dead from here on
+            return taken;
         }
-        inline static void put(lua_State * L, const Container& s)
+
+        inline static void put(lua_State * L, Ptr&& up)
         {
-            lua_newtable(L);
-            for (auto it = s.begin(); it != s.end(); ++it)
+            if (!up) { lua_pushnil(L); return; }
+            if (!LuaClass<MT>::pushMetatable(L))
             {
-                LuaStack<typename Container::key_type>::put(L, it->first);
-                LuaStack<typename Container::mapped_type>::put(L, it->second);
-                lua_rawset(L, -3);
+                luaL_argerror(L, 1, lua_pushfstring(L, "cpp class `%s` not export", LUAAA_RTTI_CLASS_NAME(T)));
             }
+            luaaa_detail::UserData* uData = luaaa_detail::new_userdata(L, (alignof(Ptr) - 1) + sizeof(Ptr));
+            uData->obj = const_cast<MT*>(up.get());
+            uData->holder = new (luaaa_detail::payload(uData, alignof(Ptr))) Ptr(std::move(up));
+            uData->holderKind = luaaa_detail::UniqueHolderTag<Ptr>::key();
+            uData->dtor = &release;
+            lua_insert(L, -2);
+            lua_setmetatable(L, -2);
+        }
+
+    private:
+        static void release(luaaa_detail::UserData* uData)
+        {
+            static_cast<Ptr*>(uData->holder)->~Ptr();
         }
     };
 
@@ -4722,6 +4616,7 @@ namespace LUAAA_NS
     template<typename U, typename V>
     struct LuaStack<std::pair<U, V>>
     {
+        enum { LUAAA_TABLE_STACK = 1 };
         typedef std::pair<U, V> Container;
         inline static Container get(lua_State * L, int idx)
         {
@@ -4752,7 +4647,7 @@ namespace LUAAA_NS
     };
  
     // std::tuple 
-#if __cplusplus >= 201402 || _MSVC_LANG >= 201402
+#if LUAAA_CPLUSPLUS >= 201402L
     template <typename> struct is_tuple : std::false_type {};
     template <typename ...T> struct is_tuple<std::tuple<T...>> : std::true_type {};
 
@@ -4793,6 +4688,7 @@ namespace LUAAA_NS
     template<typename ...TS> 
     struct LuaStack<std::tuple<TS...>>
     {
+        enum { LUAAA_TABLE_STACK = 1 };
         typedef std::tuple<TS...> Container;
         inline static Container get(lua_State* L, int idx)
         {
@@ -4806,7 +4702,7 @@ namespace LUAAA_NS
             save_tuple_to_lua_table(L, s, std::make_index_sequence<std::tuple_size<Container>::value>{});
         }
     };
-#elif __cplusplus
+#else
     template <typename T, size_t N>
     struct TupleAccessor
     {
@@ -4841,6 +4737,7 @@ namespace LUAAA_NS
     template<typename ...TS>
     struct LuaStack<std::tuple<TS...>>
     {
+        enum { LUAAA_TABLE_STACK = 1 };
         typedef std::tuple<TS...> Container;
         inline static Container get(lua_State* L, int idx)
         {
@@ -4865,6 +4762,78 @@ namespace LUAAA_NS
 
 #endif //#if !LUAAA_WITHOUT_CPP_STDLIB
 
+#if !LUAAA_WITHOUT_CPP_STDLIB && LUAAA_CPLUSPLUS >= 201703L
+
+#include <optional>
+#include <string_view>
+
+namespace LUAAA_NS
+{
+    // std::optional<T>: nil (or a missing argument) <-> std::nullopt; anything
+    // else is converted as a T.
+    template<typename T>
+    struct LuaStack<std::optional<T>>
+    {
+        inline static std::optional<T> get(lua_State * L, int idx)
+        {
+            if (lua_isnoneornil(L, idx))
+            {
+                return std::nullopt;
+            }
+            return std::optional<T>(LuaStack<T>::get(L, idx));
+        }
+
+        inline static void put(lua_State * L, const std::optional<T>& v)
+        {
+            if (v)
+            {
+                LuaStack<T>::put(L, *v);
+            }
+            else
+            {
+                lua_pushnil(L);
+            }
+        }
+    };
+
+    // std::string_view: like std::string it carries its length (embedded NULs
+    // survive); like `const char*` a view READ from lua points into the lua
+    // string and is only valid while that value is alive -- in practice, for
+    // the duration of the bound call. Unlike them it takes a string only (a
+    // number is not converted: that would rewrite the lua value in place).
+    template<>
+    struct LuaStack<std::string_view>
+    {
+        inline static std::string_view get(lua_State * L, int idx)
+        {
+            luaaa_detail::conv_check_type(L, idx, LUA_TSTRING);
+            size_t len = 0;
+            const char * s = lua_tolstring(L, idx, &len);
+            return std::string_view(s, len);
+        }
+
+        inline static void put(lua_State * L, const std::string_view& s)
+        {
+            lua_pushlstring(L, s.data(), s.size());
+        }
+    };
+
+    namespace luaaa_detail {
+        template<typename T>
+        inline bool match_arg(lua_State* L, int idx, const std::optional<T>*, rank<4>)
+        {
+            return lua_isnoneornil(L, idx) || match_arg(L, idx, static_cast<const T*>(nullptr), rank<4>());
+        }
+
+        inline bool match_arg(lua_State* L, int idx, const std::string_view*, rank<4>)
+        {
+            return lua_type(L, idx) == LUA_TSTRING;
+        }
+    }
+}
+
+#endif // C++17
+
 #undef LUAAA_TRY
 #undef LUAAA_CATCH
 #undef LUAAA_BOUNDARY_TRY
@@ -4873,7 +4842,8 @@ namespace LUAAA_NS
 #undef LUAAA_IMPLEMENT_FUNCTION_CALLER
 #undef LUAAA_REPORT_CTOR_NAME_CONFLICT
 #undef LUAAA_RTTI_CLASS_NAME
-#undef LUAAA_USE_NEW_MODULE_REGISTRY
+#undef LUAAA_CPLUSPLUS
+#undef LUAAA_FOREIGN_EXCEPTION
 
 #endif
 

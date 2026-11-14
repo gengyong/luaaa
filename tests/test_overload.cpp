@@ -9,8 +9,8 @@
 // 设计原则: 断言「既定/合理」行为; 若行为不符则 FAIL, 揭示 bug 或文档缺口。
 #include "luaaa.hpp"
 
-// Lua 5.1/LuaJIT 没有 lua_isinteger (5.3+ API); 用 lua_isnumber 近似 (5.1 无整数子类型)。
-#if defined(LUA_VERSION_NUM) && LUA_VERSION_NUM <= 501
+// Lua 5.1 / 5.2 / LuaJIT 没有 lua_isinteger (5.3+ API); 用 lua_isnumber 近似 (这些版本没有整数子类型)。
+#if defined(LUA_VERSION_NUM) && LUA_VERSION_NUM < 503
 inline bool lua_isinteger(lua_State * L, int idx) { return lua_isnumber(L, idx); }
 #endif
 

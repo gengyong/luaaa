@@ -135,7 +135,7 @@ print(c)               -- __tostring: prints "Bingo (1y)"
 c:play(10)
 ```
 
-> Note: a `static`/free function bound with `fun` is called like a method — `c:meow("Bingo")`. The instance in front of the colon is passed as a hidden `self` and skipped; the remaining arguments map to the function's parameters.
+> Note: a `static`/free function bound with `fun` is called like a method — `c:meow("Bingo")`. The instance in front of the colon is passed as a hidden `self` and skipped; the remaining arguments map to the function's parameters. To call it on the class itself — `Cat.meow("Bingo")` — bind it with `staticFun` instead; `constant` puts a value there (`Cat.MAX_LIVES`).
 
 ## Constructors
 
@@ -270,12 +270,16 @@ You've seen everything you need for day-to-day use. The **[Advanced Guide](GUIDE
 * Automatic type conversions and the full container/`pair`/`tuple` support table
 * Teaching luaaa your own types with `LuaStack`
 * Constructor variants: factories, singletons, custom deleters, name conflicts
-* Overloaded functions and disambiguation
+* Overloaded functions: disambiguation, and several functions under one Lua name with `overload` / `overloadCtor`
+* C++ inheritance with `inherit<Base>()`
+* `std::shared_ptr` / `std::unique_ptr`, `std::optional`, `std::string_view`, move-only return types
 * Callbacks in depth (`std::function` vs raw pointers)
 * Metamethods (`__index`, `__newindex`, `__gc`, `__tostring`)
 * Multiple `lua_State`s
 * **Embedded / no-stdlib** builds for microcontrollers
 * Feature macros, GC ownership rules, and troubleshooting
+
+Upgrading from 1.x? [CHANGELOG.md](CHANGELOG.md) lists what changed in 2.0, including the incompatible changes.
 
 ## License
 

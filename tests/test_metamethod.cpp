@@ -203,7 +203,7 @@ int main() {
         bool r = raises(L, "g_madd = MM + 5");
         printf("    (信息) MM + 5 raises=%d (期望 true: 模块运算符不触发)\n", (int)r);
         // 模块 __add 存于模块表而非 metatable, Lua 不会用它做 + 运算 -> 报错
-        check(r, "MM + 5 应报错 (模块 __add 不进 metatable, 运算符不生效)");
+        check(r, "KNOWN-LIMITATION: MM + 5 报错 (模块的 __add 存在模块表里, 不进 metatable, 运算符不生效)");
     }
     {
         // 但作为普通字段可调用 (实证: 仅函数调用形式可用)

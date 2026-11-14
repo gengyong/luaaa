@@ -96,7 +96,7 @@ int main() {
     printf("[整数 get 浮点格式字符串 '1e30' (M1 修复, 版本相关)]\n");
     {
         bool r = raises(L, "c.ll('1e30')");
-#if !defined(LUA_VERSION_NUM) || LUA_VERSION_NUM <= 501
+#if !defined(LUA_VERSION_NUM) || LUA_VERSION_NUM < 503   // 5.1 / 5.2 / LuaJIT: 数字都是 double
         // LuaJIT/5.1: '1e30' 截断为 LLONG_MAX, 不报错 (Lua 固有行为)
         printf("    (信息) echo_ll('1e30') raises=%d (5.1/LuaJIT: 截断, 非bug)\n", (int)r);
         check(!r, "echo_ll('1e30') 5.1/LuaJIT 截断为 LLONG_MAX (Lua 固有, 非 bug)");
@@ -141,12 +141,14 @@ int main() {
     printf("[整数 put 64位无符号 — M2 修复 (版本相关)]\n");
     {
         bool r = raises(L, "c.ull(18446744073709551615)");
-#if !defined(LUA_VERSION_NUM) || LUA_VERSION_NUM <= 501
+#if !defined(LUA_VERSION_NUM) || LUA_VERSION_NUM < 503   // 5.1 / 5.2 / LuaJIT: 数字都是 double
         printf("    (信息) echo_ull(ULLONG_MAX) raises=%d (5.1/LuaJIT: get 截断, put 不报错)\n", (int)r);
         check(!r, "echo_ull(ULLONG_MAX) 5.1/LuaJIT: get 截断为 LLONG_MAX (Lua 固有)");
 #else
         printf("    (信息) echo_ull(ULLONG_MAX): raises=%d\n", (int)r);
-        check(r, "echo_ull(ULLONG_MAX) 应报溢出 (M2 修复, 与浮点特化对称)");
+        // 5.3+: 该字面量是浮点 2^64, 没有对应的整数值, 在入参处就被拒绝
+        // (等宽无符号的出参规则见 test_review10 R9-2)。
+        check(r, "echo_ull(2^64 浮点字面量) 报错: 不是整数");
 #endif
     }
 

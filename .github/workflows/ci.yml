@@ -1,0 +1,81 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Linux, distro packages: every packaged Lua (LuaJIT, 5.1 - 5.4) x C++11/14/17/20,
+  # with ASan + UBSan, then the concurrency test under TSan.
+  linux:
+    name: linux / ${{ matrix.cxx }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        cxx: [g++, clang++]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Lua
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libluajit-5.1-dev liblua5.1-0-dev liblua5.2-dev liblua5.3-dev liblua5.4-dev
+      - name: Tests (ASan + UBSan)
+        run: CXX=${{ matrix.cxx }} bash tests/run.sh all
+      - name: Concurrency test (TSan)
+        run: CXX=${{ matrix.cxx }} SAN_MODE=tsan bash tests/run.sh all
+      - name: Examples (desktop + embedded, no-stdlib)
+        run: CXX=${{ matrix.cxx }} bash example/build.sh
+      - name: Warnings are errors
+        run: |
+          for std in c++11 c++14 c++17 c++20; do
+            for src in tests/test_review10.cpp tests/test_functional.cpp tests/test_features_no_property.cpp; do
+              ${{ matrix.cxx }} -std=$std -Wall -Wextra -Wpedantic -Wshadow -Werror -fsyntax-only -I. $(pkg-config --cflags lua5.4) $src
+            done
+          done
+
+  macos:
+    name: macos / clang
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Lua
+        run: brew install pkg-config lua lua@5.4 luajit
+      - name: Tests (ASan + UBSan)
+        run: CXX=clang++ bash tests/run.sh all
+      - name: Examples
+        run: bash example/build.sh
+
+  # Every PUC Lua release line built from source, on all three platforms.
+  # This is the only job that covers MSVC and Lua 5.5.
+  from-source:
+    name: ${{ matrix.os }} / lua ${{ matrix.lua }} / c++${{ matrix.std }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        lua: ["5.1.5", "5.2.4", "5.3.6", "5.4.8", "5.5.0"]
+        std: ["11"]
+        include:
+          - { os: windows-latest, lua: "5.4.8", std: "17" }
+          - { os: windows-latest, lua: "5.5.0", std: "20" }
+          - { os: ubuntu-latest,  lua: "5.5.0", std: "20" }
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch Lua ${{ matrix.lua }}
+        shell: bash
+        run: |
+          curl -fsSL -o lua.tar.gz https://www.lua.org/ftp/lua-${{ matrix.lua }}.tar.gz
+          tar xzf lua.tar.gz
+      - name: Configure
+        run: cmake -S tests -B build -DLUA_SRC_DIR=${{ github.workspace }}/lua-${{ matrix.lua }} -DLUAAA_CXX_STANDARD=${{ matrix.std }} -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        run: cmake --build build --config Release --parallel
+      - name: Test
+        run: ctest --test-dir build -C Release --output-on-failure

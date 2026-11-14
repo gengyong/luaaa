@@ -1,9 +1,7 @@
 // 子测试: LUAAA_FEATURE_PROPERTY=0 时的行为.
-// 探查: 关闭 property 后, luaaa.hpp:1492-1496 把 metatable 设为自身的 __index.
-//   若用户同时注册 fun("__index", f), luaL_setfuncs 会用该函数覆盖 metatable.__index,
-//   导致: (a) 所有方法访问都走该 __index 函数 (而非自索引 metatable);
-//         (b) 方法访问返回 __index 的返回值 (破坏方法查找).
-//   这是 PROPERTY=0 + fun("__index") 的交互问题.
+// 2.0 之前: 关闭 property 后用户的 fun("__index", f) 会顶掉整个方法查找, 连方法也取不到。
+// 2.0 起: 方法存在独立的方法表里, 用户的 __index 只在方法找不到时兜底, 与开启
+//   property 时的查找顺序一致 (方法 -> 用户 __index)。
 #define LUAAA_FEATURE_PROPERTY 0
 #include "luaaa.hpp"
 #include <cstdio>
@@ -49,8 +47,9 @@ int main() {
         lua_pop(L, 1);
         printf("    (信息) P2.new().method -> customIndex_calls=%d is_42=%d\n",
                g_idx_calls, (int)is_42);
-        // 当前行为: 方法访问被 __index 函数接管 (破坏方法查找). 文档化此交互问题.
-        check(is_42, "PROPERTY=0 + fun('__index'): 方法访问被 __index 函数接管 (交互问题, 文档化)");
+        check(!is_42, "PROPERTY=0 + fun('__index'): 方法仍能取到 (不再被用户 __index 顶掉)");
+        check(luaL_dostring(L, "local o = P2.new(); assert(o:method(7) == 7); assert(o.nosuch == 42)") == 0,
+              "PROPERTY=0 + fun('__index'): 方法可调用, 不存在的键才走用户 __index");
     }
 
     printf("[PROPERTY=0 无 __index — 方法应正常]\n");
