@@ -13,12 +13,10 @@
 // 验证方式: 在 fork() 子进程执行 (lua_close 触发崩溃会中断测试),
 //   父进程观测退出码 (0=正常, -6=SIGABRT 崩溃)。
 #include "luaaa.hpp"
+#include "child_process.h"
 
 #include <cstdio>
 #include <stdexcept>
-#include <unistd.h>
-#include <sys/wait.h>
-#include <fcntl.h>
 using namespace luaaa;
 
 static int P = 0, F = 0;
@@ -27,19 +25,6 @@ static void check(bool ok, const char* n) {
     else    { ++F; printf("  FAIL %s\n", n); }
 }
 
-static int run_in_child(int (*scenario)(void)) {
-    pid_t pid = fork();
-    if (pid == 0) {
-        int devnull = open("/dev/null", O_WRONLY);
-        if (devnull >= 0) { dup2(devnull, 1); dup2(devnull, 2); close(devnull); }
-        _exit(scenario());
-    }
-    int status = 0;
-    waitpid(pid, &status, 0);
-    if (WIFEXITED(status)) return WEXITSTATUS(status);
-    if (WIFSIGNALED(status)) return -WTERMSIG(status);
-    return -999;
-}
 
 // ====== 会抛异常的 deleter ======
 struct Thing { int v; Thing() : v(0) {} int get() const { return v; } };

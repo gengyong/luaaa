@@ -15,13 +15,11 @@
 // 验证方式: 抛异常风险的调用在 fork() 子进程执行 (避免主进程崩溃),
 //   父进程观测退出码 (0=正常, -6=SIGABRT 崩溃)。修复后主进程内验证 pcall 捕获。
 #include "luaaa.hpp"
+#include "child_process.h"
 
 #include <cstdio>
 #include <stdexcept>
 #include <string>
-#include <unistd.h>
-#include <sys/wait.h>
-#include <fcntl.h>
 using namespace luaaa;
 
 static int P = 0, F = 0;
@@ -30,19 +28,6 @@ static void check(bool ok, const char* n) {
     else    { ++F; printf("  FAIL %s\n", n); }
 }
 
-static int run_in_child(int (*scenario)(void)) {
-    pid_t pid = fork();
-    if (pid == 0) {
-        int devnull = open("/dev/null", O_WRONLY);
-        if (devnull >= 0) { dup2(devnull, 1); dup2(devnull, 2); close(devnull); }
-        _exit(scenario());
-    }
-    int status = 0;
-    waitpid(pid, &status, 0);
-    if (WIFEXITED(status)) return WEXITSTATUS(status);
-    if (WIFSIGNALED(status)) return -WTERMSIG(status);
-    return -999;
-}
 
 // ====== 会抛异常的类 ======
 class Prop {

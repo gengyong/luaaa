@@ -62,7 +62,8 @@ int main() {
     // 空数组 def
     printf("[模块空数组 def]\n");
     {
-        static const int empty[] = {};
+        // 零长数组 `int a[] = {}` 是 GNU 扩展，MSVC 报 C2466；用长度 1 的数组、传长度 0
+        static const int empty[1] = { 0 };
         lua_State* L = luaL_newstate(); luaL_openlibs(L);
         LuaModule(L, "e").def("arr", empty, 0);
         bool ok = luaL_dostring(L, "assert(#e.arr == 0, 'empty')") == 0;

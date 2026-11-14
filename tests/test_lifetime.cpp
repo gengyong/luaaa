@@ -11,6 +11,7 @@
 // 注: 「构造函数抛异常」会触发 std::terminate. 为不让该崩溃中断整个测试套件,
 //     该场景用 fork() 在子进程中执行, 父进程观测子进程退出码 (SIGABRT=134).
 #include "luaaa.hpp"
+#include "child_process.h"
 
 #include <cstdio>
 #include <cstring>
@@ -18,9 +19,6 @@
 #include <string>
 #include <functional>
 #include <stdexcept>
-#include <sys/wait.h>
-#include <unistd.h>
-#include <fcntl.h>
 using namespace luaaa;
 
 static int P = 0, F = 0;
@@ -70,30 +68,20 @@ static const char* read_stored_cstr() { return g_stored_cstr ? g_stored_cstr : "
 
 // 在子进程中运行「构造函数抛异常」场景 (会 std::terminate, 退出码 134)
 // 返回子进程退出状态码 (WIFEXITED) 或 -1 (被信号终止, 如 SIGABRT)
-static int run_ctor_throw_in_child() {
-    pid_t pid = fork();
-    if (pid == 0) {
-        // 子进程: 重定向 stdout 到 /dev/null (我们只关心退出方式)
-        int devnull = open("/dev/null", O_WRONLY);
-        if (devnull >= 0) { dup2(devnull, 1); dup2(devnull, 2); close(devnull); }
-        lua_State* L = luaL_newstate(); luaL_openlibs(L);
-        {
-            LuaClass<ThrowCtor> cls(L, "ThrowCtor");
-            cls.ctor();
-        }
-        // 调用会抛的 ctor. C++ 异常穿过 luaaa 边界 (无 try/catch) -> std::terminate
-        luaL_dostring(L, "ThrowCtor.new()");
-        lua_close(L);
-        _exit(0);  // 若未 terminate, 正常退出
+static int ctor_throw_scenario() {
+    lua_State* L = luaL_newstate(); luaL_openlibs(L);
+    {
+        LuaClass<ThrowCtor> cls(L, "ThrowCtor");
+        cls.ctor();
     }
-    int status = 0;
-    waitpid(pid, &status, 0);
-    if (WIFEXITED(status)) return WEXITSTATUS(status);
-    if (WIFSIGNALED(status)) return -WTERMSIG(status);  // 负数表示被信号杀
-    return -999;
+    // 调用会抛的 ctor: 异常应被翻译为 lua_error, 不致 std::terminate
+    luaL_dostring(L, "ThrowCtor.new()");
+    lua_close(L);
+    return 0;
 }
 
-#include <fcntl.h>  // 已在文件顶部包含
+static int run_ctor_throw_in_child() { return run_in_child(ctor_throw_scenario); }
+
 
 int main() {
     // ========================================================================
@@ -171,8 +159,11 @@ int main() {
     {
         lua_State* L = luaL_newstate(); luaL_openlibs(L);
         { LuaModule m(L, "S"); m.fun("store", store_cstr); m.fun("read", read_stored_cstr); }
-        check(luaL_dostring(L, "S.store('hello')") == 0, "存储 const char*");
-        check(luaL_dostring(L, "assert(S.read() == 'hello')") == 0, "立即读回有效");
+        // 存与读必须在同一个 chunk 里，并由局部变量 s 保活字符串：
+        // 分成两次 luaL_dostring 时，第一个 chunk（及其常量 'hello'）可能已被回收，
+        // 读到的是悬垂指针（Lua 5.4.8 / macOS 上实测读回失败）。
+        check(luaL_dostring(L, "local s = 'hel' .. 'lo'; S.store(s); assert(S.read() == 'hello')") == 0,
+              "字符串存活期间读回有效");
         printf("    (信息) const char* 单次调用内安全, 跨调用存储有悬垂风险\n");
         check(true, "KNOWN-LIMITATION: const char* 参数不能跨调用保存 (仅文档约定, 此处不作实测)");
         lua_close(L);
